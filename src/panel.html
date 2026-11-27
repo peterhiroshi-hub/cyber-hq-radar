@@ -1188,14 +1188,15 @@
 
   function routeBadgeForBot(b) {
     if (b.state === 'working') return { text: b.activeDispatchCount > 0 ? (b.activeDispatchCount + 'W LIVE') : 'LIVE', cls: 'live' };
+    const ownHostId = b.botHost || snap?.controlHostId || 'local';
     const target = snap?.hosts?.find((h) => h.id === b.primaryHost);
-    if (target && !target.isControlPlane) {
+    if (target && target.id !== ownHostId) {
       if (target.metrics?.gpu) return { text: '→GPU', cls: 'gpu' };
-      if (b.role === 'qa') return { text: '→QA', cls: 'qa' };
+      if (b.role === 'qa' && !target.isControlPlane) return { text: '→QA', cls: 'qa' };
       return { text: '→' + target.label.slice(0, 6), cls: 'qa' };
     }
-    const ctrl = (snap?.controlHostLabel || 'CTRL').slice(0, 5);
-    return { text: '@' + ctrl, cls: '' };
+    const ownLabel = hostShort(ownHostId).slice(0, 6);
+    return { text: '@' + ownLabel, cls: '' };
   }
 
   function hostOwnerInfo(h, bots) {
@@ -1317,11 +1318,13 @@
     lastRenderSig = sig;
     renderModelMixChart(data);
 
-    // Left Bay: All Bots explicitly grouped inside Control Plane chassis
+    // Left Bay: All Bots explicitly grouped by squad with per-host ownership badge
     const groups = orderBotGroups(data.bots || []);
     const ctrlLabel = data.controlHostLabel || 'LOCAL';
+    const botHosts = new Set((data.bots || []).map((b) => b.botHost || data.controlHostId || 'local'));
+    const bayPill = botHosts.size > 1 ? ('MULTI-HOST · ' + botHosts.size) : ('@' + ctrlLabel);
     let brainHtml =
-      '<div class="bay-banner"><span>BOT BRAINS</span><span class="host-pill">@' + escapeHtml(ctrlLabel) + '</span></div>';
+      '<div class="bay-banner"><span>BOT BRAINS</span><span class="host-pill">' + escapeHtml(bayPill) + '</span></div>';
     for (const g of groups) {
       brainHtml += '<div class="squad-hdr ' + (g.squad === 'command' ? 'command' : '') + '" style="color:' + g.color + '">' +
         '<span>' + escapeHtml(g.label) + '</span><span>' + g.bots.length + '</span></div>' +
@@ -1433,10 +1436,11 @@
     if (f.kind === 'worker') {
       const w = snap?.workers?.find((x) => x.id === f.id);
       const ag = formatAgentBadge(w?.agent);
+      const matchedBot = w?.bot ? snap?.bots?.find((x) => x.name === w.bot) : null;
       inspectorText.innerHTML = '<b>[WORKER]</b> ' + escapeHtml(w?.title || f.id) +
         ' · 模型 <b style="color:' + ag.color + '">' + escapeHtml(ag.label) + '</b>' +
         ' · 运行于 <b>' + escapeHtml(hostShort(w?.host)) + '</b>' +
-        (w?.bot ? (' · 由 <b>' + escapeHtml(w.bot) + '</b> (@' + escapeHtml(snap?.controlHostLabel || 'CTRL') + ') 派发') : '') +
+        (w?.bot ? (' · 由 <b>' + escapeHtml(w.bot) + '</b> (@' + escapeHtml(hostShort(matchedBot?.botHost)) + ') 派发') : '') +
         ' · 点击直达 Session' + lockTag;
       return;
     }

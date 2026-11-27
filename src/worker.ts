@@ -38,7 +38,8 @@ function execFileAsync(
 }
 
 export type CliRunner = (args: string[]) => Promise<unknown | null>
-export type MetricsRunner = (hostId: string, sshTarget?: string | null) => Promise<HostMetrics | null>
+export type RelayCliRunner = (hubSshTarget: string, args: string[]) => Promise<unknown | null>
+export type MetricsRunner = (hostId: string, sshTarget?: string | null, hubSshTarget?: string | null) => Promise<HostMetrics | null>
 export type VideoSaver = (input: SaveVideoInput) => Promise<SaveVideoOutput>
 export type WallOpener = (url: string) => Promise<boolean>
 
@@ -59,9 +60,16 @@ export function parseSshTargets(raw: string | undefined | null): Record<string, 
     if (eq <= 0) continue
     const key = trimmed.slice(0, eq).trim()
     const val = trimmed.slice(eq + 1).trim()
-    if (key && val) out[key] = val
+    if (key && val) {
+      out[key] = val
+      out[key.toLowerCase()] = val
+    }
   }
   return out
+}
+
+function lookupSshTarget(cfg: PluginConfig, envName: string, endpointHost: string | null): string {
+  return cfg.sshTargets[envName] || cfg.sshTargets[envName.toLowerCase()] || endpointHost || envName
 }
 
 export function defaultOrcaBin(): string {
@@ -75,6 +83,34 @@ export async function runOrcaCliJson(args: string[]): Promise<unknown | null> {
       maxBuffer: 4 * 1024 * 1024,
       env: { ...process.env }
     })
+    const trimmed = stdout.trim()
+    if (!trimmed) return null
+    const parsed = JSON.parse(trimmed) as { ok?: boolean; result?: unknown }
+    return parsed && parsed.ok !== false ? (parsed.result ?? parsed) : null
+  } catch {
+    return null
+  }
+}
+
+export async function runRelayedOrcaCliJson(hubSshTarget: string, args: string[]): Promise<unknown | null> {
+  if (!hubSshTarget || !/^[a-zA-Z0-9._@-]+$/.test(hubSshTarget)) return null
+  if (!args.every((a) => /^[a-zA-Z0-9._:/@-]+$/.test(a))) return null
+  const quotedArgs = args.map((a) => `'${a}'`).join(' ')
+  const cmd = `PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"; ORCA=$(command -v orca 2>/dev/null || echo /Applications/Orca.app/Contents/Resources/bin/orca); "$ORCA" ${quotedArgs}`
+  try {
+    const { stdout } = await execFileAsync(
+      'ssh',
+      [
+        '-o', 'BatchMode=yes',
+        '-o', 'ConnectTimeout=2',
+        '-o', 'ControlMaster=auto',
+        '-o', 'ControlPersist=120',
+        '-o', 'ControlPath=/tmp/orca-hq-ssh-%C',
+        hubSshTarget,
+        cmd
+      ],
+      { timeout: 6000, maxBuffer: 4 * 1024 * 1024 }
+    )
     const trimmed = stdout.trim()
     if (!trimmed) return null
     const parsed = JSON.parse(trimmed) as { ok?: boolean; result?: unknown }
@@ -205,8 +241,12 @@ export async function collectLocalMetrics(): Promise<HostMetrics | null> {
   }
 }
 
-export async function collectRemoteHostMetrics(sshTarget: string): Promise<HostMetrics | null> {
+export async function collectRemoteHostMetrics(
+  sshTarget: string,
+  viaHubSsh?: string | null
+): Promise<HostMetrics | null> {
   if (!sshTarget || !/^[a-zA-Z0-9._@-]+$/.test(sshTarget)) return null
+  if (viaHubSsh && !/^[a-zA-Z0-9._@-]+$/.test(viaHubSsh)) return null
   const remoteScript = [
     'OS=$(uname -s); echo "OS:$OS"',
     'if [ "$OS" = "Darwin" ]; then',
@@ -227,20 +267,21 @@ export async function collectRemoteHostMetrics(sshTarget: string): Promise<HostM
     'fi'
   ].join(' ')
 
+  const sshBase = [
+    '-o', 'BatchMode=yes',
+    '-o', 'ConnectTimeout=2',
+    '-o', 'ControlMaster=auto',
+    '-o', 'ControlPersist=120',
+    '-o', 'ControlPath=/tmp/orca-hq-ssh-%C'
+  ]
+  const b64Script = Buffer.from(remoteScript, 'utf8').toString('base64')
+  const relayedCmd = `ssh -o BatchMode=yes -o ConnectTimeout=2 ${sshTarget} 'printf %s ${b64Script} | (base64 -d 2>/dev/null || base64 -D) | sh'`
+  const execArgs = viaHubSsh
+    ? [...sshBase, viaHubSsh, relayedCmd]
+    : [...sshBase, sshTarget, remoteScript]
+
   try {
-    const { stdout } = await execFileAsync(
-      'ssh',
-      [
-        '-o', 'BatchMode=yes',
-        '-o', 'ConnectTimeout=2',
-        '-o', 'ControlMaster=auto',
-        '-o', 'ControlPersist=120',
-        '-o', 'ControlPath=/tmp/orca-hq-ssh-%C',
-        sshTarget,
-        remoteScript
-      ],
-      { timeout: 4500 }
-    )
+    const { stdout } = await execFileAsync('ssh', execArgs, { timeout: viaHubSsh ? 6000 : 4500 })
     const lines = stdout.trim().split('\n').map((s: string) => s.trim()).filter(Boolean)
     if (lines.length < 5) return null
 
@@ -302,12 +343,26 @@ export async function collectRemoteHostMetrics(sshTarget: string): Promise<HostM
   }
 }
 
-export async function defaultMetricsRunner(hostId: string, sshTarget?: string | null): Promise<HostMetrics | null> {
+export async function defaultMetricsRunner(
+  hostId: string,
+  sshTarget?: string | null,
+  hubSshTarget?: string | null
+): Promise<HostMetrics | null> {
   if (hostId === 'local') return collectLocalMetrics()
   const target = sshTarget || hostId
-  const res = await collectRemoteHostMetrics(target)
-  if (res) return res
-  if (sshTarget && sshTarget !== hostId) return collectRemoteHostMetrics(hostId)
+  const direct = await collectRemoteHostMetrics(target)
+  if (direct) return direct
+  if (sshTarget && sshTarget !== hostId) {
+    const byAlias = await collectRemoteHostMetrics(hostId)
+    if (byAlias) return byAlias
+  }
+  if (hubSshTarget) {
+    const viaHubAlias = await collectRemoteHostMetrics(hostId, hubSshTarget)
+    if (viaHubAlias) return viaHubAlias
+    if (target !== hostId) {
+      return collectRemoteHostMetrics(target, hubSshTarget)
+    }
+  }
   return null
 }
 
@@ -460,7 +515,9 @@ export async function collectHqSnapshot(
   orca: OrcaWorkerApi,
   cli: CliRunner,
   metricsRunner: MetricsRunner,
-  eventLog: HqEventEntry[]
+  eventLog: HqEventEntry[],
+  relayCli: RelayCliRunner = runRelayedOrcaCliJson,
+  hubSshByHostOut?: Map<string, string>
 ): Promise<HqSnapshot> {
   const cfg = await readPluginConfig(orca)
 
@@ -487,7 +544,6 @@ export async function collectHqSnapshot(
       ? ((ctrlBotsRes as { bots: RawBot[] }).bots)
       : []
   } else if (!cfg.controlEnvironment && rawBots.length === 0 && rawEnvs.length > 0) {
-    // Auto-detect: if local Orca has 0 Bots (e.g. monitoring laptop), pick the paired environment that hosts Bots
     const probes = await Promise.all(
       rawEnvs.map(async (env) => {
         const envName = env.name || env.id || ''
@@ -509,19 +565,31 @@ export async function collectHqSnapshot(
     ? await Promise.all([
         cli(['worktree', 'ps', '--since', '24h', '--json']),
         cli(['orchestration', 'worker-list', '--json']),
-        metricsRunner('local', null).catch(() => null)
+        metricsRunner('local', null, null).catch(() => null)
       ])
     : [null, null, null]
 
-  const remoteResults = await Promise.all(
+  type RemoteHostResult = {
+    env: RawEnv
+    envName: string
+    sshTarget: string
+    viaHub: string | null
+    viaHubSsh: string | null
+    ok: boolean
+    workers: RawRemoteWorker[]
+    remotePs: RawWorktreePs[]
+    metrics: HostMetrics | null
+  }
+
+  const directRemoteResults: RemoteHostResult[] = await Promise.all(
     rawEnvs.map(async (env) => {
       const envName = env.name || env.id || 'remote'
       const endpointHost = extractEndpointHost(env.endpoints?.[0]?.endpoint)
-      const sshTarget = cfg.sshTargets[envName] || endpointHost || envName
+      const sshTarget = lookupSshTarget(cfg, envName, endpointHost)
       const [res, remotePsRes, metrics] = await Promise.all([
         cli(['orchestration', 'worker-list', '--environment', envName, '--json']),
         cli(['worktree', 'ps', '--environment', envName, '--since', '24h', '--json']),
-        metricsRunner(envName, sshTarget).catch(() => null)
+        metricsRunner(envName, sshTarget, null).catch(() => null)
       ])
       const workers = Array.isArray((res as { workers?: unknown })?.workers)
         ? ((res as { workers: RawRemoteWorker[] }).workers)
@@ -529,9 +597,81 @@ export async function collectHqSnapshot(
       const remotePs = Array.isArray((remotePsRes as { worktrees?: unknown })?.worktrees)
         ? ((remotePsRes as { worktrees: RawWorktreePs[] }).worktrees)
         : []
-      return { env, envName, ok: res !== null || remotePsRes !== null, workers, remotePs, metrics }
+      return {
+        env,
+        envName,
+        sshTarget,
+        viaHub: null,
+        viaHubSsh: null,
+        ok: res !== null || remotePsRes !== null,
+        workers,
+        remotePs,
+        metrics
+      }
     })
   )
+
+  // Hub Relay Discovery: ask paired hub hosts (e.g. a remote Mac mini) for their downstream paired servers
+  const seenEnvNames = new Set<string>(['local', ...directRemoteResults.map((r) => r.envName.toLowerCase())])
+  const localHostNorm = cleanLocalHostLabel().toLowerCase()
+  const relayedResults: RemoteHostResult[] = []
+
+  const relayProbes = await Promise.all(
+    directRemoteResults
+      .filter((hub) => hub.ok && (hub.metrics !== null || hub.envName === controlHostId || Boolean(cfg.sshTargets[hub.envName.toLowerCase()])))
+      .map(async (hub) => {
+        const childEnvsRes = await relayCli(hub.sshTarget, ['environment', 'list', '--json']).catch(() => null)
+        const childEnvs: RawEnv[] = Array.isArray((childEnvsRes as { environments?: unknown })?.environments)
+          ? ((childEnvsRes as { environments: RawEnv[] }).environments)
+          : []
+        return { hub, childEnvs }
+      })
+  )
+
+  const relayTasks: Promise<RemoteHostResult>[] = []
+  for (const { hub, childEnvs } of relayProbes) {
+    for (const childEnv of childEnvs) {
+      const childName = childEnv.name || childEnv.id || ''
+      if (!childName) continue
+      const lower = childName.toLowerCase()
+      if (seenEnvNames.has(lower) || lower === localHostNorm) continue
+      seenEnvNames.add(lower)
+      const childEpHost = extractEndpointHost(childEnv.endpoints?.[0]?.endpoint)
+      const childSsh = lookupSshTarget(cfg, childName, childEpHost)
+      if (hubSshByHostOut) hubSshByHostOut.set(childName, hub.sshTarget)
+      relayTasks.push(
+        (async (): Promise<RemoteHostResult> => {
+          const [res, remotePsRes, metrics] = await Promise.all([
+            relayCli(hub.sshTarget, ['orchestration', 'worker-list', '--environment', childName, '--json']).catch(() => null),
+            relayCli(hub.sshTarget, ['worktree', 'ps', '--environment', childName, '--since', '24h', '--json']).catch(() => null),
+            metricsRunner(childName, childSsh, hub.sshTarget).catch(() => null)
+          ])
+          const workers = Array.isArray((res as { workers?: unknown })?.workers)
+            ? ((res as { workers: RawRemoteWorker[] }).workers)
+            : []
+          const remotePs = Array.isArray((remotePsRes as { worktrees?: unknown })?.worktrees)
+            ? ((remotePsRes as { worktrees: RawWorktreePs[] }).worktrees)
+            : []
+          return {
+            env: childEnv,
+            envName: childName,
+            sshTarget: childSsh,
+            viaHub: hub.envName,
+            viaHubSsh: hub.sshTarget,
+            ok: res !== null || remotePsRes !== null || metrics !== null,
+            workers,
+            remotePs,
+            metrics
+          }
+        })()
+      )
+    }
+  }
+  if (relayTasks.length > 0) {
+    relayedResults.push(...(await Promise.all(relayTasks)))
+  }
+
+  const remoteResults: RemoteHostResult[] = [...directRemoteResults, ...relayedResults]
 
   const rawLocalPs: RawWorktreePs[] = Array.isArray((localPsRes as { worktrees?: unknown })?.worktrees)
     ? ((localPsRes as { worktrees: RawWorktreePs[] }).worktrees)
@@ -547,28 +687,52 @@ export async function collectHqSnapshot(
     }
   }
 
+  // Index Bot Homes across ALL machines (local + every paired/relayed host) for true per-Bot machine ownership
+  const envNameById = new Map<string, string>()
+  for (const env of rawEnvs) {
+    const name = env.name || env.id || ''
+    if (!name) continue
+    envNameById.set(name.toLowerCase(), name)
+    if (env.id) envNameById.set(env.id.toLowerCase(), name)
+  }
+  const resolveHostId = (rawHostId?: string | null): HostId => {
+    if (!rawHostId || rawHostId === 'local') return 'local'
+    return envNameById.get(rawHostId.toLowerCase()) || rawHostId
+  }
+
   const psByBotHome = new Map<string, RawWorktreePs>()
+  const botHostByName = new Map<string, HostId>()
   const botNameByWorkspaceId = new Map<string, string>()
   const hostWsByBotName = new Map<string, string>()
 
-  if (controlHostId === 'local') {
-    for (const ws of hostWorkspaces) {
-      if (ws.kind === 'folder' && ws.name) {
-        hostWsByBotName.set(ws.name.toLowerCase(), ws.id)
-        botNameByWorkspaceId.set(ws.id, ws.name)
-      }
+  for (const ws of hostWorkspaces) {
+    if (ws.kind === 'folder' && ws.name) {
+      hostWsByBotName.set(ws.name.toLowerCase(), ws.id)
+      botNameByWorkspaceId.set(ws.id, ws.name)
     }
   }
 
-  const controlPsRows =
-    controlHostId === 'local'
-      ? rawLocalPs
-      : (remoteResults.find((r) => r.envName === controlHostId)?.remotePs ?? [])
-
-  for (const row of controlPsRows) {
+  for (const row of rawLocalPs) {
     if (row.botHome && row.bot) {
+      const ownerHost = resolveHostId(row.hostId)
       psByBotHome.set(row.bot, row)
+      botHostByName.set(row.bot, ownerHost)
       if (row.worktreeId) botNameByWorkspaceId.set(row.worktreeId, row.bot)
+    }
+  }
+
+  for (const { envName, remotePs } of remoteResults) {
+    for (const row of remotePs) {
+      if (row.botHome && row.bot) {
+        const existingHost = botHostByName.get(row.bot)
+        const existingTs = psByBotHome.get(row.bot)?.lastActivityAt ?? -1
+        const nextTs = row.lastActivityAt ?? 0
+        if (!existingHost || existingHost === 'local' || nextTs >= existingTs) {
+          psByBotHome.set(row.bot, row)
+          botHostByName.set(row.bot, envName)
+        }
+        if (row.worktreeId) botNameByWorkspaceId.set(row.worktreeId, row.bot)
+      }
     }
   }
 
@@ -768,29 +932,40 @@ export async function collectHqSnapshot(
   }
 
   const hosts: HostNodeInfo[] = []
+  const botCountsByHost = new Map<string, number>()
+  for (const ownerHost of botHostByName.values()) {
+    botCountsByHost.set(ownerHost, (botCountsByHost.get(ownerHost) || 0) + 1)
+  }
+
   if (includeLocal) {
+    const localHasBots = (botCountsByHost.get('local') || 0) > 0 || controlHostId === 'local'
     hosts.push({
       id: 'local',
       label: cleanLocalHostLabel(),
-      role: controlHostId === 'local' ? 'CONTROL PLANE · LOCAL' : 'MONITORING CONSOLE',
+      role: localHasBots ? 'CONTROL PLANE · LOCAL' : 'MONITORING CONSOLE',
       specs: formatHostSpecs(localMetrics, os.platform() === 'darwin' ? 'macOS' : 'Local'),
       endpoint: 'local',
       online: true,
-      isControlPlane: controlHostId === 'local',
+      isControlPlane: localHasBots,
       activeWorkers: workers.filter((w) => w.host === 'local' && w.state === 'working').length,
       totalWorkspaces: hostWorkspaces.filter((w) => !w.hostId || w.hostId === 'local').length,
       metrics: localMetrics
     })
   }
 
-  for (const { env, envName, ok, metrics } of remoteResults) {
-    const isCtrl = envName === controlHostId
+  for (const { env, envName, viaHub, ok, metrics } of remoteResults) {
+    const isCtrl = envName === controlHostId || (botCountsByHost.get(envName) || 0) > 0
     const hasGpu = Boolean(metrics?.gpu)
+    const hubSuffix = viaHub ? ` · VIA ${viaHub.toUpperCase()}` : ''
     hosts.push({
       id: envName,
       label: envName.toUpperCase(),
-      role: isCtrl ? 'REMOTE CONTROL PLANE' : hasGpu ? 'GPU COMPUTE NODE' : 'PAIRED COMPUTE NODE',
-      specs: formatHostSpecs(metrics, 'Paired Node'),
+      role: isCtrl
+        ? 'REMOTE CONTROL PLANE'
+        : hasGpu
+          ? `GPU COMPUTE NODE${hubSuffix}`
+          : `PAIRED COMPUTE NODE${hubSuffix}`,
+      specs: formatHostSpecs(metrics, viaHub ? `Relayed via ${viaHub}` : 'Paired Node'),
       endpoint: env.endpoints?.[0]?.endpoint || envName,
       online: ok,
       isControlPlane: isCtrl,
@@ -801,25 +976,26 @@ export async function collectHqSnapshot(
   }
 
   const gpuHostId = hosts.find((h) => h.metrics?.gpu)?.id || null
-  const nonCtrlNonGpuHostId = hosts.find((h) => h.id !== controlHostId && h.id !== gpuHostId)?.id || null
+  const nonCtrlNonGpuHostId = hosts.find((h) => !h.isControlPlane && h.id !== gpuHostId)?.id || null
 
   const bots: BotNodeInfo[] = rawBots.map((b) => {
     const name = b.name || 'Bot'
     const role = classifyRole(name)
     const home = psByBotHome.get(name)
+    const actualBotHost = botHostByName.get(name) || controlHostId
     const bestAgent = pickBestAgent(home?.agents)
     const botWorkers = workers.filter((w) => w.bot === name)
     const activeDispatchCount = botWorkers.filter((w) => w.state === 'working').length
 
     // Dynamic host routing based on actual observed workers, then cluster capability heuristics
     const observedHosts = [...new Set(botWorkers.map((w) => w.host))]
-    let primaryHost: HostId = observedHosts[0] || controlHostId
+    let primaryHost: HostId = observedHosts[0] || actualBotHost
     let secondaryHost: HostId | null = observedHosts[1] || null
     if (observedHosts.length === 0) {
       if (role === 'delivery' && gpuHostId) primaryHost = gpuHostId
       else if (role === 'qa' && nonCtrlNonGpuHostId) {
         primaryHost = nonCtrlNonGpuHostId
-        secondaryHost = controlHostId
+        secondaryHost = actualBotHost
       }
     }
 
@@ -835,7 +1011,7 @@ export async function collectHqSnapshot(
       shortName: shortBotLabel(name),
       squad: classifySquad(name),
       role,
-      botHost: controlHostId,
+      botHost: actualBotHost,
       primaryHost,
       secondaryHost,
       agent: b.agent || 'antigravity',
@@ -922,12 +1098,14 @@ export default function activate(
   cli: CliRunner = runOrcaCliJson,
   metricsRunner: MetricsRunner = defaultMetricsRunner,
   videoSaver: VideoSaver = defaultVideoSaver,
-  wallOpener: WallOpener = defaultWallOpener
+  wallOpener: WallOpener = defaultWallOpener,
+  relayCli: RelayCliRunner = runRelayedOrcaCliJson
 ): void {
   const eventLog: HqEventEntry[] = [
     { ts: Date.now(), kind: 'system', message: 'CYBER HQ RADAR ONLINE · LINKED TO ORCA MESH' }
   ]
   let latestSnapshot: HqSnapshot | null = null
+  const hubSshByHost = new Map<string, string>()
 
   const pushLog = (kind: HqEventEntry['kind'], message: string) => {
     eventLog.unshift({ ts: Date.now(), kind, message })
@@ -947,7 +1125,8 @@ export default function activate(
   }
 
   const refreshAndBroadcast = async (): Promise<HqSnapshot> => {
-    const snap = await collectHqSnapshot(orca, cli, metricsRunner, eventLog)
+    hubSshByHost.clear()
+    const snap = await collectHqSnapshot(orca, cli, metricsRunner, eventLog, relayCli, hubSshByHost)
     latestSnapshot = snap
     const activeTotal = snap.summary.activeWorkers + snap.summary.workingBots
     const tone = activeTotal > 0 ? 'accent' : 'success'
@@ -1047,7 +1226,10 @@ export default function activate(
 
     const selector = wsId ? `id:${wsId}` : wsPath ? `path:${wsPath}` : null
     if (selector) {
-      const act = await cli(['worktree', 'activate', '--environment', host, '--worktree', selector, '--json'])
+      const hubSsh = hubSshByHost.get(host)
+      const act = hubSsh
+        ? await relayCli(hubSsh, ['worktree', 'activate', '--environment', host, '--worktree', selector, '--json'])
+        : await cli(['worktree', 'activate', '--environment', host, '--worktree', selector, '--json'])
       if (act && (act as { activated?: boolean }).activated !== false) {
         pushLog('workspace', `ACTIVATED REMOTE WORKTREE :: ${host} · ${wsPath || wsId}`)
         return { opened: true, mode: 'activated', detail: `Activated on ${host}` }

@@ -1,5 +1,5 @@
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
-import type { CliRunner, MetricsRunner, VideoSaver, WallOpener } from './worker'
+import type { CliRunner, MetricsRunner, RelayCliRunner, VideoSaver, WallOpener } from './worker'
 import * as main from './worker'
 
 test('collects multi-host bots, workers, and performance metrics, jumps sessions, exports video, and opens fullscreen wall', async () => {
@@ -266,6 +266,186 @@ test('remote console mode monitors a paired control host and hides local laptop 
   assert.equal(seenSshTargets['ctrl-mac'], 'user@100.64.0.1')
   assert.equal(seenSshTargets['gpu-box'], 'user@100.64.0.2')
   assert.equal(snap.summary.totalBots, 1)
+
+  await worker.deactivate()
+})
+
+test('discovers downstream servers via hub SSH relay, attributes multi-host bot ownership accurately, and relays session activation', async () => {
+  const host = mockHost({
+    results: {
+      'settings.get': {
+        settings: {
+          sshTargets: 'HUB-MAC=hubuser@100.64.0.1'
+        }
+      },
+      'workspace.list': { workspaces: [], truncated: false }
+    }
+  })
+
+  const mockCli: CliRunner = async (args) => {
+    if (args[0] === 'environment' && args[1] === 'list') {
+      return {
+        environments: [
+          { id: 'env-hub', name: 'hub-mac', endpoints: [{ endpoint: 'ws://100.64.0.1:6768' }] }
+        ]
+      }
+    }
+    if (args[0] === 'bot' && args[1] === 'list') {
+      return {
+        bots: [
+          { id: 'b-local', name: 'Laptop Bot', agent: 'opencode', chats: { count: 2 } },
+          { id: 'b-del', name: 'Alpha Delivery', agent: 'antigravity', chats: { count: 8 } },
+          { id: 'b-qa', name: 'Alpha QA', agent: 'codex', chats: { count: 5 } }
+        ]
+      }
+    }
+    if (args[0] === 'worktree' && args[1] === 'ps' && !args.includes('--environment')) {
+      return {
+        worktrees: [
+          {
+            worktreeId: 'folder:laptop-bot',
+            repo: 'Bots',
+            bot: 'Laptop Bot',
+            botHome: true,
+            status: 'idle',
+            lastActivityAt: 100
+          }
+        ]
+      }
+    }
+    if (args[0] === 'worktree' && args[1] === 'ps' && args.includes('hub-mac')) {
+      return {
+        worktrees: [
+          {
+            worktreeId: 'folder:alpha-del',
+            repo: 'Bots',
+            bot: 'Alpha Delivery',
+            botHome: true,
+            status: 'working',
+            lastActivityAt: 300
+          },
+          {
+            worktreeId: 'folder:alpha-qa',
+            repo: 'Bots',
+            bot: 'Alpha QA',
+            botHome: true,
+            status: 'idle',
+            lastActivityAt: 200
+          }
+        ]
+      }
+    }
+    if (args[0] === 'orchestration' && args[1] === 'worker-list') {
+      return { workers: [] }
+    }
+    return null
+  }
+
+  const relayedCalls: string[] = []
+  const mockRelayCli: RelayCliRunner = async (hubSsh, args) => {
+    relayedCalls.push(`${hubSsh}:${args.join(' ')}`)
+    if (hubSsh !== 'hubuser@100.64.0.1') return null
+    if (args[0] === 'environment' && args[1] === 'list') {
+      return {
+        environments: [
+          { id: 'env-gpu', name: 'gpu-box', endpoints: [{ endpoint: 'ws://100.64.0.10:6768' }] },
+          { id: 'env-qa', name: 'qa-box', endpoints: [{ endpoint: 'ws://100.64.0.20:6768' }] }
+        ]
+      }
+    }
+    if (args[0] === 'orchestration' && args[1] === 'worker-list' && args.includes('gpu-box')) {
+      return {
+        workers: [
+          {
+            dispatchId: 'ctx_relayed_1',
+            state: 'working',
+            liveness: 'live',
+            agent: 'antigravity/gemini-4-neon',
+            workspace: 'repo1::/home/worker/orca/workspaces/alpha/feat-relay'
+          }
+        ]
+      }
+    }
+    if (args[0] === 'worktree' && args[1] === 'ps' && args.includes('gpu-box')) {
+      return {
+        worktrees: [
+          {
+            worktreeId: 'repo1::/home/worker/orca/workspaces/alpha/feat-relay',
+            repo: 'alpha',
+            displayName: 'feat-relay',
+            path: '/home/worker/orca/workspaces/alpha/feat-relay',
+            status: 'working',
+            crossStoreParent: { parent: { workspaceKey: 'folder:alpha-del' } },
+            lastActivityAt: 400
+          }
+        ]
+      }
+    }
+    if (args[0] === 'worktree' && args[1] === 'activate') {
+      return { activated: true }
+    }
+    return { workers: [], worktrees: [] }
+  }
+
+  const seenHubRelays: Record<string, string | null | undefined> = {}
+  const mockMetrics: MetricsRunner = async (hostId, _sshTarget, hubSshTarget) => {
+    seenHubRelays[hostId] = hubSshTarget
+    return {
+      cpuPct: 30,
+      ramPct: 40,
+      ramUsedGb: 12,
+      ramTotalGb: 32,
+      diskPct: 45,
+      diskFreeGb: 200,
+      load1: 1.4,
+      cores: 16,
+      osName: hostId === 'local' || hostId === 'hub-mac' ? 'macOS' : 'Linux',
+      gpu:
+        hostId === 'gpu-box'
+          ? { name: 'RTX 4070', utilPct: 25, vramUsedMiB: 1024, vramTotalMiB: 12282, tempC: 45, powerW: 35 }
+          : null
+    }
+  }
+
+  const mod = {
+    default: (orca: Parameters<typeof main.default>[0]) =>
+      main.default(orca, mockCli, mockMetrics, undefined, undefined, mockRelayCli),
+    deactivate: main.deactivate
+  }
+  const worker = await mountWorker(mod, { host })
+  const snap = await worker.request('hq.getSnapshot')
+
+  // All 4 hosts visible: local laptop + hub-mac + relayed gpu-box & qa-box
+  assert.equal(snap.hosts.length, 4)
+  assert.ok(snap.hosts.some((h) => h.id === 'gpu-box' && h.metrics?.gpu?.name === 'RTX 4070'))
+  assert.ok(snap.hosts.some((h) => h.id === 'qa-box'))
+  assert.equal(snap.hosts.find((h) => h.id === 'hub-mac')?.isControlPlane, true)
+  assert.equal(seenHubRelays['gpu-box'], 'hubuser@100.64.0.1')
+  assert.equal(seenHubRelays['qa-box'], 'hubuser@100.64.0.1')
+
+  // True multi-host Bot ownership
+  const laptopBot = snap.bots.find((b) => b.name === 'Laptop Bot')
+  const delBot = snap.bots.find((b) => b.name === 'Alpha Delivery')
+  const qaBot = snap.bots.find((b) => b.name === 'Alpha QA')
+  assert.equal(laptopBot?.botHost, 'local')
+  assert.equal(delBot?.botHost, 'hub-mac')
+  assert.equal(delBot?.primaryHost, 'gpu-box')
+  assert.equal(qaBot?.botHost, 'hub-mac')
+  assert.equal(qaBot?.primaryHost, 'qa-box')
+
+  // Relayed worker resolved to Alpha Delivery via crossStoreParent on hub-mac
+  const relayedWorker = snap.workers.find((w) => w.id === 'ctx_relayed_1')
+  assert.equal(relayedWorker?.bot, 'Alpha Delivery')
+  assert.equal(relayedWorker?.host, 'gpu-box')
+
+  // Clicking relayed downstream worker relays worktree activate through hub-mac
+  const jump = await worker.request('hq.openSession', {
+    workspaceId: 'repo1::/home/worker/orca/workspaces/alpha/feat-relay',
+    host: 'gpu-box'
+  })
+  assert.equal(jump.opened, true)
+  assert.equal(jump.mode, 'activated')
+  assert.ok(relayedCalls.some((c) => c.includes('worktree activate') && c.includes('gpu-box')))
 
   await worker.deactivate()
 })
