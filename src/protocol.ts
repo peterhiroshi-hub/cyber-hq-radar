@@ -48,6 +48,8 @@ export type BotNodeInfo = {
   primaryHost: HostId
   secondaryHost: HostId | null
   targetHosts?: HostId[]
+  activeHosts?: HostId[]
+  recentHosts?: HostId[]
   agent: string
   state: 'working' | 'unread' | 'idle' | 'paused'
   chatsCount: number

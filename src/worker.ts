@@ -630,17 +630,27 @@ export function shortBotLabel(name: string): string {
   return name.length > 16 ? `${name.slice(0, 15)}…` : name
 }
 
-function mapWorkerState(
+export function mapWorkerState(
   rawState: string | undefined,
   liveness?: string,
   agentState?: string
 ): WorkerNodeInfo['state'] {
-  if (agentState === 'working' || rawState === 'working' || rawState === 'active') return 'working'
+  if (agentState === 'working' || rawState === 'working') return 'working'
   if (rawState === 'permission' || rawState === 'blocked' || agentState === 'blocked') return 'permission'
   if (rawState === 'succeeded' || rawState === 'done') return 'succeeded'
   if (rawState === 'failed') return 'failed'
   if (rawState === 'stopped') return 'stopped'
-  if (liveness === 'live' && rawState !== 'inactive' && rawState !== 'idle') return 'working'
+  if (
+    liveness === 'live' &&
+    rawState !== 'inactive' &&
+    rawState !== 'idle' &&
+    rawState !== 'succeeded' &&
+    rawState !== 'done' &&
+    rawState !== 'failed' &&
+    rawState !== 'stopped'
+  ) {
+    return 'working'
+  }
   return 'idle'
 }
 
@@ -1006,13 +1016,42 @@ export async function collectHqSnapshot(
   const psByBotHome = new Map<string, RawWorktreePs>()
   const botHostByName = new Map<string, HostId>()
   const botNameByWorkspaceId = new Map<string, string>()
+  const ambiguousBareWorkspaces = new Set<string>()
   const hostWsByBotName = new Map<string, string>()
   const globalPsByWorkspace = new Map<string, RawWorktreePs>()
+
+  const registerBotWorkspace = (ownerHost: HostId, worktreeId: string, botName: string) => {
+    if (!worktreeId || !botName) return
+    botNameByWorkspaceId.set(`${ownerHost}::${worktreeId}`, botName)
+    if (!ambiguousBareWorkspaces.has(worktreeId)) {
+      const existingBare = botNameByWorkspaceId.get(worktreeId)
+      if (!existingBare) {
+        botNameByWorkspaceId.set(worktreeId, botName)
+      } else if (existingBare !== botName) {
+        ambiguousBareWorkspaces.add(worktreeId)
+        botNameByWorkspaceId.delete(worktreeId)
+      }
+    }
+  }
+
+  const lookupBotByWorkspaceId = (
+    worktreeId: string | null | undefined,
+    ...preferredHosts: (HostId | null | undefined)[]
+  ): string | null => {
+    if (!worktreeId) return null
+    for (const h of preferredHosts) {
+      if (!h) continue
+      const scoped = botNameByWorkspaceId.get(`${h}::${worktreeId}`)
+      if (scoped) return scoped
+    }
+    return botNameByWorkspaceId.get(worktreeId) || null
+  }
 
   for (const ws of hostWorkspaces) {
     if (ws.kind === 'folder' && ws.name) {
       hostWsByBotName.set(ws.name.toLowerCase(), ws.id)
-      botNameByWorkspaceId.set(ws.id, ws.name)
+      const ownerHost = resolveHostId(ws.hostId)
+      registerBotWorkspace(ownerHost, ws.id, ws.name)
     }
   }
 
@@ -1026,7 +1065,7 @@ export async function collectHqSnapshot(
       psByBotHome.set(row.bot, row)
       botHostByName.set(row.bot, ownerHost)
       if (ownerHost === 'local') localBotHomes.add(row.bot)
-      if (row.worktreeId) botNameByWorkspaceId.set(row.worktreeId, row.bot)
+      if (row.worktreeId) registerBotWorkspace(ownerHost, row.worktreeId, row.bot)
     }
   }
 
@@ -1045,6 +1084,7 @@ export async function collectHqSnapshot(
         }
       }
       if (row.botHome && row.bot) {
+        const ownerHost = row.hostId && row.hostId !== 'local' ? resolveHostId(row.hostId) : envName
         const existingHost = botHostByName.get(row.bot)
         const existingTs = psByBotHome.get(row.bot)?.lastActivityAt ?? -1
         const nextTs = row.lastActivityAt ?? 0
@@ -1052,7 +1092,7 @@ export async function collectHqSnapshot(
           psByBotHome.set(row.bot, row)
           botHostByName.set(row.bot, envName)
         }
-        if (row.worktreeId) botNameByWorkspaceId.set(row.worktreeId, row.bot)
+        if (row.worktreeId) registerBotWorkspace(ownerHost, row.worktreeId, row.bot)
       }
     }
   }
@@ -1091,9 +1131,9 @@ export async function collectHqSnapshot(
   // Collect authoritative real dispatch records (dispatchId -> Bot + server + title) from local Bots + remote hubs
   const dispatchById = new Map<string, RawBotDispatch>()
   const dispatchByWorkspace = new Map<string, RawBotDispatch>()
-  const botTrafficServers = new Map<string, { server: string; startedAt: number }[]>()
+  const botTrafficServers = new Map<string, { server: string; startedAt: number; state: string | null }[]>()
 
-  const ingestDispatch = (d: RawBotDispatch) => {
+  const ingestDispatch = (d: RawBotDispatch, sourceHost: HostId) => {
     if (!d?.bot) return
     if (d.dispatchId && !dispatchById.has(d.dispatchId)) {
       dispatchById.set(d.dispatchId, d)
@@ -1101,16 +1141,17 @@ export async function collectHqSnapshot(
     if (d.workspace && !dispatchByWorkspace.has(d.workspace)) {
       dispatchByWorkspace.set(d.workspace, d)
     }
-    if (d.server) {
-      const resolvedSrv = resolveHostId(d.server)
+    const rawSrv = typeof d.server === 'string' ? d.server.trim() : ''
+    const resolvedSrv = (!rawSrv || rawSrv.toLowerCase() === 'local') ? sourceHost : resolveHostId(rawSrv)
+    if (resolvedSrv) {
       const list = botTrafficServers.get(d.bot) || []
-      list.push({ server: resolvedSrv, startedAt: d.startedAt ?? 0 })
+      list.push({ server: resolvedSrv, startedAt: d.startedAt ?? 0, state: d.state || null })
       botTrafficServers.set(d.bot, list)
     }
   }
 
   for (const r of remoteResults) {
-    for (const d of r.dispatches) ingestDispatch(d)
+    for (const d of r.dispatches) ingestDispatch(d, r.envName)
   }
 
   // Also query local Bot work lists for Bots hosted locally (never guessing from names)
@@ -1138,7 +1179,7 @@ export async function collectHqSnapshot(
       })
     )
     for (const rows of localWorkLists) {
-      for (const d of rows) ingestDispatch(d)
+      for (const d of rows) ingestDispatch(d, 'local')
     }
   }
 
@@ -1159,7 +1200,7 @@ export async function collectHqSnapshot(
       const parentWsKey = row.crossStoreParent?.parent?.workspaceKey || null
       const dispatchRec = (row.worktreeId && dispatchByWorkspace.get(row.worktreeId)) || null
       // Strictly real Orca provenance: crossStoreParent, explicit row.bot, or real bot work dispatch
-      const bot = (parentWsKey && botNameByWorkspaceId.get(parentWsKey)) || row.bot || dispatchRec?.bot || null
+      const bot = lookupBotByWorkspaceId(parentWsKey, host, 'local', controlHostId) || row.bot || dispatchRec?.bot || null
       const cleanLocalPath = stripOsHomePrefix(row.path)
       const squad = classifySquad(bot || `${row.displayName || ''} ${row.repo || ''} ${row.branch || ''} ${cleanLocalPath}`, knownSquads)
       workers.push({
@@ -1183,14 +1224,56 @@ export async function collectHqSnapshot(
     }
   }
 
-  for (const { envName, workers: rWorkers, remotePs } of remoteResults) {
+  const terminalOrIdleStates = new Set(['inactive', 'idle', 'succeeded', 'done', 'failed', 'stopped'])
+  const workerStateScore = (s: WorkerNodeInfo['state']) =>
+    s === 'working' ? 3 : s === 'permission' ? 2 : s === 'succeeded' ? 1 : 0
+
+  for (const { envName, viaHub, workers: rWorkers, remotePs } of remoteResults) {
+    const hubChainHosts = viaHub
+      ? viaHub.split(/\s*(?:→|->)\s*/).map((s) => s.trim()).filter(Boolean).reverse()
+      : []
     const psByWorkspace = new Map<string, RawWorktreePs>()
     for (const rps of remotePs) {
-      if (rps.worktreeId) psByWorkspace.set(rps.worktreeId, rps)
+      if (!rps.worktreeId) continue
+      const existing = psByWorkspace.get(rps.worktreeId)
+      if (!existing || (rps.bot && !existing.bot) || (rps.lastActivityAt ?? 0) > (existing.lastActivityAt ?? 0)) {
+        psByWorkspace.set(rps.worktreeId, rps)
+      }
     }
 
+    // Sort rWorkers BEFORE deduplicating/trimming so active working/live workers always win over older exited entries
+    const remoteWorkerPriority = (w: RawRemoteWorker): number => {
+      if (w.state === 'working') return 4
+      if (w.state === 'permission' || w.state === 'blocked') return 3
+      if (w.liveness === 'live' && (!w.state || !terminalOrIdleStates.has(w.state))) return 2
+      if (w.state === 'succeeded' || w.state === 'done') return 1
+      return 0
+    }
+    const sortedRWorkers = [...rWorkers].sort((a, b) => {
+      const pDiff = remoteWorkerPriority(b) - remoteWorkerPriority(a)
+      if (pDiff !== 0) return pDiff
+      const aPs = a.workspace ? (psByWorkspace.get(a.workspace) || globalPsByWorkspace.get(a.workspace)) : undefined
+      const bPs = b.workspace ? (psByWorkspace.get(b.workspace) || globalPsByWorkspace.get(b.workspace)) : undefined
+      const aAgentWorking = pickBestAgent(aPs?.agents)?.state === 'working' ? 1 : 0
+      const bAgentWorking = pickBestAgent(bPs?.agents)?.state === 'working' ? 1 : 0
+      if (bAgentWorking !== aAgentWorking) return bAgentWorking - aAgentWorking
+      const aTs = Number(
+        (a.dispatchId ? dispatchById.get(a.dispatchId)?.startedAt : null) ??
+          aPs?.lastActivityAt ??
+          (a.workspace ? dispatchByWorkspace.get(a.workspace)?.startedAt : null) ??
+          0
+      )
+      const bTs = Number(
+        (b.dispatchId ? dispatchById.get(b.dispatchId)?.startedAt : null) ??
+          bPs?.lastActivityAt ??
+          (b.workspace ? dispatchByWorkspace.get(b.workspace)?.startedAt : null) ??
+          0
+      )
+      return bTs - aTs
+    })
+
     const seenRemoteWs = new Set<string>()
-    for (const w of rWorkers.slice(0, 14)) {
+    for (const w of sortedRWorkers) {
       const ws = w.workspace || ''
       if (ws && seenRemoteWs.has(ws)) continue
       if (ws) seenRemoteWs.add(ws)
@@ -1212,7 +1295,7 @@ export async function collectHqSnapshot(
       // Strictly real Orca provenance: real dispatchId, crossStoreParent, or explicit matchedPs.bot (zero name guessing)
       const bot =
         dispatchRec?.bot ||
-        (parentWsKey ? botNameByWorkspaceId.get(parentWsKey) : null) ||
+        lookupBotByWorkspaceId(parentWsKey, envName, ...hubChainHosts, controlHostId) ||
         matchedPs?.bot ||
         null
       const cleanRemotePath = stripOsHomePrefix(wsPath)
@@ -1238,7 +1321,15 @@ export async function collectHqSnapshot(
       })
     }
 
-    for (const rps of remotePs) {
+    const sortedRemotePs = [...remotePs].sort((a, b) => {
+      const aState = mapWorkerState(a.status, undefined, pickBestAgent(a.agents)?.state)
+      const bState = mapWorkerState(b.status, undefined, pickBestAgent(b.agents)?.state)
+      const diff = workerStateScore(bState) - workerStateScore(aState)
+      if (diff !== 0) return diff
+      return (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0)
+    })
+
+    for (const rps of sortedRemotePs) {
       const ws = rps.worktreeId || ''
       if (!ws || seenRemoteWs.has(ws)) continue
       if (rps.botHome || rps.repo === 'Bots') continue
@@ -1252,7 +1343,7 @@ export async function collectHqSnapshot(
       const parentWsKey = rps.crossStoreParent?.parent?.workspaceKey || null
       const dispatchRec = dispatchByWorkspace.get(ws) || null
       const bot =
-        (parentWsKey ? botNameByWorkspaceId.get(parentWsKey) : null) ||
+        lookupBotByWorkspaceId(parentWsKey, envName, ...hubChainHosts, controlHostId) ||
         rps.bot ||
         dispatchRec?.bot ||
         null
@@ -1351,8 +1442,61 @@ export async function collectHqSnapshot(
     })
   }
 
+  workers.sort((a, b) => {
+    const diff = workerStateScore(b.state) - workerStateScore(a.state)
+    if (diff !== 0) return diff
+    return (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0)
+  })
+
+  // Fair per-host trimming: always preserve EVERY working worker across all hosts,
+  // plus recent workers up to 5 per host, capped at 24 total via round-robin across hosts.
+  const hostOrderForTrim = hosts.map((h) => h.id)
+  for (const w of workers) {
+    if (!hostOrderForTrim.includes(w.host)) hostOrderForTrim.push(w.host)
+  }
+  const workingWorkers: WorkerNodeInfo[] = []
+  const workingCountByHost = new Map<string, number>()
+  const recentQueueByHost = new Map<string, WorkerNodeInfo[]>()
+  for (const hid of hostOrderForTrim) recentQueueByHost.set(hid, [])
+  for (const w of workers) {
+    if (w.state === 'working') {
+      workingWorkers.push(w)
+      workingCountByHost.set(w.host, (workingCountByHost.get(w.host) || 0) + 1)
+    } else {
+      const q = recentQueueByHost.get(w.host) || []
+      q.push(w)
+      recentQueueByHost.set(w.host, q)
+    }
+  }
+  const perHostRecentQueues: WorkerNodeInfo[][] = hostOrderForTrim.map((hid) => {
+    const wkWorking = workingCountByHost.get(hid) || 0
+    const recentAllowance = Math.max(0, 5 - wkWorking)
+    return (recentQueueByHost.get(hid) || []).slice(0, recentAllowance)
+  })
+  const trimmedWorkers: WorkerNodeInfo[] = [...workingWorkers]
+  const nonWorkingBudget = Math.max(0, 24 - workingWorkers.length)
+  let addedNonWorking = 0
+  for (let slot = 0; slot < 5 && addedNonWorking < nonWorkingBudget; slot++) {
+    for (const q of perHostRecentQueues) {
+      if (addedNonWorking >= nonWorkingBudget) break
+      if (slot < q.length) {
+        trimmedWorkers.push(q[slot])
+        addedNonWorking += 1
+      }
+    }
+  }
+  trimmedWorkers.sort((a, b) => {
+    const diff = workerStateScore(b.state) - workerStateScore(a.state)
+    if (diff !== 0) return diff
+    return (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0)
+  })
+
   const validHostIds = new Set(hosts.map((h) => h.id))
-  const recentCutoffMs = Date.now() - 24 * 60 * 60 * 1000
+  const recentCutoffMs = Date.now() - 6 * 60 * 60 * 1000
+  const isLiveDispatchState = (s?: string | null): boolean => {
+    const v = (s || '').toLowerCase()
+    return v === 'running' || v === 'working'
+  }
 
   const bots: BotNodeInfo[] = rawBots.map((b) => {
     const name = b.name || 'Bot'
@@ -1360,37 +1504,57 @@ export async function collectHqSnapshot(
     const home = psByBotHome.get(name)
     const actualBotHost = botHostByName.get(name) || controlHostId
     const bestAgent = pickBestAgent(home?.agents)
-    const botWorkers = workers.filter((w) => w.bot === name)
+    const botWorkers = trimmedWorkers.filter((w) => w.bot === name)
     const activeDispatchCount = botWorkers.filter((w) => w.state === 'working').length
 
-    // 100% traffic-driven routing: ONLY real observed workers and real recent bot dispatches (zero name heuristics)
-    const trafficHosts: HostId[] = []
-    const addTrafficHost = (hid: HostId) => {
-      if (!hid || !validHostIds.has(hid) || trafficHosts.includes(hid)) return
-      trafficHosts.push(hid)
+    // Three-tier 100% real traffic provenance (zero name heuristics):
+    // 1. botHost (own Brain host)
+    // 2. activeHosts (remote hosts with a live working worker or running/working dispatch)
+    // 3. recentHosts (remote hosts with a visible recent worker or completed real dispatch within 6h)
+    const activeHosts: HostId[] = []
+    const recentHostsRaw: HostId[] = []
+    const visibleWorkerHosts: HostId[] = []
+    const addUniqueValid = (arr: HostId[], hid: HostId, excludeHost?: HostId) => {
+      if (!hid || !validHostIds.has(hid) || (excludeHost && hid === excludeHost) || arr.includes(hid)) return
+      arr.push(hid)
     }
+
     const sortedBotWorkers = [...botWorkers].sort((a, b) => {
       const aLive = a.state === 'working' ? 1 : 0
       const bLive = b.state === 'working' ? 1 : 0
       if (bLive !== aLive) return bLive - aLive
       return (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0)
     })
-    for (const w of sortedBotWorkers) addTrafficHost(w.host)
-    const recentDispatches = [...(botTrafficServers.get(name) || [])]
-      .filter((x) => !x.startedAt || x.startedAt >= recentCutoffMs)
-      .sort((a, b) => b.startedAt - a.startedAt)
-    for (const rd of recentDispatches) addTrafficHost(rd.server)
-
-    const primaryHost: HostId = trafficHosts[0] || actualBotHost
-    const secondaryHost: HostId | null =
-      trafficHosts[1] || (primaryHost !== actualBotHost && validHostIds.has(actualBotHost) ? actualBotHost : null)
-
-    // Always retain the Bot's own hosting machine (actualBotHost) PLUS every real remote traffic host
-    const targetHosts: HostId[] = []
-    if (validHostIds.has(actualBotHost)) targetHosts.push(actualBotHost)
-    for (const th of trafficHosts) {
-      if (th && validHostIds.has(th) && !targetHosts.includes(th)) targetHosts.push(th)
+    for (const w of sortedBotWorkers) {
+      addUniqueValid(visibleWorkerHosts, w.host)
+      if (w.host !== actualBotHost) {
+        if (w.state === 'working') addUniqueValid(activeHosts, w.host, actualBotHost)
+        else addUniqueValid(recentHostsRaw, w.host, actualBotHost)
+      }
     }
+
+    const botDispatches = [...(botTrafficServers.get(name) || [])].sort((a, b) => b.startedAt - a.startedAt)
+    for (const rd of botDispatches) {
+      if (isLiveDispatchState(rd.state)) {
+        addUniqueValid(activeHosts, rd.server, actualBotHost)
+      } else if (!rd.startedAt || rd.startedAt >= recentCutoffMs) {
+        addUniqueValid(recentHostsRaw, rd.server, actualBotHost)
+      }
+    }
+    const recentHosts = recentHostsRaw.filter((h) => !activeHosts.includes(h))
+
+    const orderedPrefHosts: HostId[] = []
+    for (const h of [...activeHosts, ...visibleWorkerHosts, ...recentHosts, actualBotHost]) {
+      addUniqueValid(orderedPrefHosts, h)
+    }
+    const primaryHost: HostId = activeHosts[0] || visibleWorkerHosts[0] || recentHosts[0] || actualBotHost
+    const secondaryHost: HostId | null = orderedPrefHosts.find((h) => h !== primaryHost) || null
+
+    // Always retain the Bot's own hosting machine (actualBotHost) PLUS activeHosts and recentHosts
+    const targetHosts: HostId[] = []
+    addUniqueValid(targetHosts, actualBotHost)
+    for (const h of activeHosts) addUniqueValid(targetHosts, h)
+    for (const h of recentHosts) addUniqueValid(targetHosts, h)
     if (targetHosts.length === 0 && primaryHost) targetHosts.push(primaryHost)
 
     let state: BotNodeInfo['state'] = 'idle'
@@ -1409,6 +1573,8 @@ export async function collectHqSnapshot(
       primaryHost,
       secondaryHost,
       targetHosts,
+      activeHosts,
+      recentHosts,
       agent: b.agent || 'antigravity',
       state,
       chatsCount: b.chats?.count ?? 1,
@@ -1421,15 +1587,6 @@ export async function collectHqSnapshot(
     }
   })
 
-  workers.sort((a, b) => {
-    const score = (s: WorkerNodeInfo['state']) =>
-      s === 'working' ? 3 : s === 'permission' ? 2 : s === 'succeeded' ? 1 : 0
-    const diff = score(b.state) - score(a.state)
-    if (diff !== 0) return diff
-    return (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0)
-  })
-
-  const trimmedWorkers = workers.slice(0, 18)
   const controlHostLabel = hosts.find((h) => h.id === controlHostId)?.label || controlHostId.toUpperCase()
 
   return {

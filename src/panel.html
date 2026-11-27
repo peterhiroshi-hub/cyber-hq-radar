@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -942,6 +942,7 @@
   let cachedLayout = null;
   let cachedConduits = [];
   let cachedLiveConduits = [];
+  let cachedHighlightedHistoryConduits = [];
   let cachedRecentConduits = [];
   let cachedStandbyConduits = [];
   let rafId = 0;
@@ -1252,13 +1253,24 @@
     return { text: '@' + ownLabel, cls: '' };
   }
 
-  function hostOwnerInfo(h, bots) {
+  function hostOwnerInfo(h, bots, workers) {
     if (h.isControlPlane) {
       const hostedBots = bots.filter((b) => (b.botHost || 'local') === h.id).length;
       return { text: 'OWNERSHIP: ' + hostedBots + ' BOT BRAINS + LOCAL WORKERS', cls: '' };
     }
+    const workerList = Array.isArray(workers) ? workers : (snap?.workers || []);
+    const visibleWorkerBotsOnHost = new Set(
+      workerList.filter((w) => w.host === h.id && w.bot).map((w) => w.bot)
+    );
+    const rankBot = (b) => {
+      if (Array.isArray(b.activeHosts) && b.activeHosts.includes(h.id)) return 0;
+      if (visibleWorkerBotsOnHost.has(b.name)) return 1;
+      if (Array.isArray(b.recentHosts) && b.recentHosts.includes(h.id)) return 2;
+      return 3;
+    };
     const dispatchers = bots
-      .filter((b) => b.primaryHost === h.id || b.secondaryHost === h.id)
+      .filter((b) => botTargetHosts(b).includes(h.id))
+      .sort((a, b) => rankBot(a) - rankBot(b))
       .map((b) => (b.shortName || b.name).toUpperCase());
     if (dispatchers.length > 0) {
       return {
@@ -1417,7 +1429,7 @@
       }
 
       const hostWorkers = (data.workers || []).filter((w) => w.host === h.id).slice(0, 4);
-      const owner = hostOwnerInfo(h, data.bots || []);
+      const owner = hostOwnerInfo(h, data.bots || [], data.workers || []);
       const workerHtml = hostWorkers.length
         ? hostWorkers.map(renderWorkerSlot).join('')
         : '<div class="hw-empty">STANDBY · NO ACTIVE WORKERS ON ' + escapeHtml(h.label) + '</div>';
@@ -1467,6 +1479,7 @@
   function updateConduitHighlights() {
     const f = activeFocus();
     const liveList = [];
+    const hiHistoryList = [];
     for (const c of cachedConduits) {
       let hi = false;
       if (f) {
@@ -1480,9 +1493,14 @@
         }
       }
       c.highlighted = hi;
-      if (c.kind === 'worker-live' || c.kind === 'bot-live' || hi) liveList.push(c);
+      if (c.kind === 'worker-live' || c.kind === 'bot-live' || (hi && c.kind !== 'history')) {
+        liveList.push(c);
+      } else if (hi && c.kind === 'history') {
+        hiHistoryList.push(c);
+      }
     }
     cachedLiveConduits = liveList;
+    cachedHighlightedHistoryConduits = hiHistoryList;
   }
 
   function botTargetHosts(b) {
@@ -1517,10 +1535,19 @@
     if (f.kind === 'bot') {
       const b = snap?.bots?.find((x) => x.name === f.botName);
       const ag = formatAgentBadge(b?.agent);
-      const targets = botTargetHosts(b).map((h) => hostShort(h)).filter(Boolean).join(' + ');
+      const ownHost = b?.botHost || snap?.controlHostId || 'local';
+      const activeList = Array.isArray(b?.activeHosts) ? b.activeHosts.filter((h) => h && h !== ownHost) : [];
+      const recentList = Array.isArray(b?.recentHosts) ? b.recentHosts.filter((h) => h && h !== ownHost && !activeList.includes(h)) : [];
+      let routeHtml = ' · Brain @ <b>' + escapeHtml(hostShort(ownHost)) + '</b>';
+      if (activeList.length > 0) {
+        routeHtml += ' · Live → <b style="color:var(--magenta)">' + escapeHtml(activeList.map((h) => hostShort(h)).join(' + ')) + '</b>';
+      }
+      if (recentList.length > 0) {
+        routeHtml += ' · Recent (≤6h) → <b style="color:var(--emerald)">' + escapeHtml(recentList.map((h) => hostShort(h)).join(' + ')) + '</b>';
+      }
       inspectorText.innerHTML = '<b>[BOT]</b> ' + escapeHtml(f.botName || '') +
         ' · Engine <b style="color:' + ag.color + '">' + escapeHtml(ag.label) + '</b>' +
-        ' · Brain on <b>' + escapeHtml(hostShort(b?.botHost)) + '</b> → Routes to <b>' + escapeHtml(targets) + '</b>' +
+        routeHtml +
         (b?.activeSessionTitle ? (' · Active: ' + escapeHtml(b.activeSessionTitle)) : '') + lockTag;
       return;
     }
@@ -1746,24 +1773,44 @@
     // Build and pre-sort conduits once per layout/data update
     const conduits = [];
     if (snap) {
-      const liveWorkerBots = new Set(
-        (snap.workers || []).filter((wk) => wk.state === 'working' && wk.bot).map((wk) => wk.bot)
-      );
+      const visibleBotHostWorkers = new Set();
+      for (const wk of snap.workers || []) {
+        if (wk.bot && workerPorts.has(wk.id)) {
+          visibleBotHostWorkers.add(wk.bot + '::' + wk.host);
+        }
+      }
       for (const b of snap.bots || []) {
         const src = botPorts.get(b.name);
         if (!src) continue;
+        const ownHost = b.botHost || 'local';
+        const activeSet = new Set(Array.isArray(b.activeHosts) ? b.activeHosts : []);
         const targets = botTargetHosts(b);
-        const hasLiveWorker = liveWorkerBots.has(b.name);
+        if (ownHost && !targets.includes(ownHost)) targets.unshift(ownHost);
         for (const tHost of targets) {
           const dst = hostPorts.get(tHost);
           if (!dst) continue;
-          const isBotLive = b.state === 'working' && tHost === (b.botHost || 'local');
+          const isOwnHost = tHost === ownHost;
+          // Skip redundant remote host-header conduit when exact Bot -> Worker-slot conduits already exist on tHost
+          if (!isOwnHost && visibleBotHostWorkers.has(b.name + '::' + tHost)) continue;
+          let kind = 'standby';
+          let color = squadColor(b.squad);
+          if (isOwnHost) {
+            const isBotLive = b.state === 'working';
+            kind = isBotLive ? 'bot-live' : 'standby';
+            color = isBotLive ? '#ff2a85' : squadColor(b.squad);
+          } else if (activeSet.has(tHost)) {
+            kind = 'bot-live';
+            color = '#ff2a85';
+          } else {
+            kind = 'history';
+            color = squadColor(b.squad);
+          }
           const dx = Math.max(36, Math.abs(dst.x - src.x) * 0.52);
           conduits.push({
             src, dst,
             c1x: src.x + dx, c1y: src.y, c2x: dst.x - dx, c2y: dst.y,
-            color: isBotLive ? '#ff2a85' : squadColor(b.squad),
-            kind: isBotLive ? 'bot-live' : 'standby',
+            color,
+            kind,
             isWorker: false,
             workerId: null,
             highlighted: false,
@@ -1774,7 +1821,7 @@
       }
       for (const wk of snap.workers || []) {
         if (!wk.bot) continue;
-        const dst = workerPorts.get(wk.id) || hostPorts.get(wk.host);
+        const dst = workerPorts.get(wk.id);
         if (!dst) continue;
         const botName = wk.bot;
         const src = botPorts.get(botName);
@@ -1795,7 +1842,7 @@
       }
     }
 
-    const layerOrder = { standby: 0, 'worker-recent': 1, 'bot-live': 2, 'worker-live': 3 };
+    const layerOrder = { standby: 0, history: 1, 'worker-recent': 2, 'bot-live': 3, 'worker-live': 4 };
     conduits.sort((a, b) => (layerOrder[a.kind] || 0) - (layerOrder[b.kind] || 0));
     cachedConduits = conduits;
     cachedRecentConduits = conduits.filter((c) => c.kind === 'worker-recent');
@@ -1927,18 +1974,24 @@
     for (let i = 0; i < cachedConduits.length; i++) {
       const c = cachedConduits[i];
       const isLive = c.kind === 'worker-live' || c.kind === 'bot-live';
+      const isHistory = c.kind === 'history';
       const dimmed = hasFocus && !c.highlighted;
-      let alpha = c.kind === 'standby' ? 0.14 : c.kind === 'worker-recent' ? 0.42 : 0.88;
-      if (c.highlighted) alpha = 0.96;
+      let alpha =
+        c.kind === 'standby' ? 0.14 :
+        isHistory ? 0.24 :
+        c.kind === 'worker-recent' ? 0.42 : 0.88;
+      if (c.highlighted) alpha = isHistory ? 0.58 : 0.96;
       else if (dimmed) alpha = 0.05;
 
-      const lw = c.highlighted ? 2.3 : isLive ? 2.0 : c.kind === 'worker-recent' ? 1.35 : 0.9;
+      const lw = isHistory
+        ? (c.highlighted ? 1.5 : 1.05)
+        : (c.highlighted ? 2.3 : isLive ? 2.0 : c.kind === 'worker-recent' ? 1.35 : 0.9);
       ctx.beginPath();
       ctx.moveTo(c.src.x, c.src.y);
       ctx.bezierCurveTo(c.c1x, c.c1y, c.c2x, c.c2y, c.dst.x, c.dst.y);
 
-      // Soft outer neon bloom pass (no Gaussian shadowBlur!)
-      if ((isLive || c.highlighted) && !dimmed) {
+      // Soft outer neon bloom pass (no Gaussian shadowBlur; never bloom historical lines)
+      if ((isLive || (c.highlighted && !isHistory)) && !dimmed) {
         ctx.setLineDash([]);
         ctx.strokeStyle = c.color;
         ctx.globalAlpha = c.highlighted ? 0.24 : 0.18;
@@ -1946,7 +1999,8 @@
         ctx.stroke();
       }
 
-      if (c.kind === 'standby' && !c.highlighted) ctx.setLineDash([3, 4]);
+      if (isHistory) ctx.setLineDash([4, 7]);
+      else if (c.kind === 'standby' && !c.highlighted) ctx.setLineDash([3, 4]);
       else ctx.setLineDash([]);
       ctx.strokeStyle = c.color;
       ctx.globalAlpha = alpha;
@@ -1960,6 +2014,9 @@
     if (cachedLiveConduits.length && Math.random() < 0.22) {
       const pick = cachedLiveConduits[Math.floor(Math.random() * cachedLiveConduits.length)];
       packets.push({ conduit: pick, t: 0, speed: 0.019 + Math.random() * 0.010, color: pick.color, hot: true });
+    } else if (cachedHighlightedHistoryConduits.length && Math.random() < 0.05) {
+      const pick = cachedHighlightedHistoryConduits[Math.floor(Math.random() * cachedHighlightedHistoryConduits.length)];
+      packets.push({ conduit: pick, t: 0, speed: 0.008 + Math.random() * 0.003, color: pick.color, hot: false });
     } else if (cachedRecentConduits.length && Math.random() < 0.06) {
       const pick = cachedRecentConduits[Math.floor(Math.random() * cachedRecentConduits.length)];
       packets.push({ conduit: pick, t: 0, speed: 0.012 + Math.random() * 0.005, color: pick.color, hot: false });
@@ -2407,31 +2464,53 @@
       });
 
       // Build Cinema Conduits
+      const visibleCinemaBotHostWorkers = new Set();
+      for (const wb of workerBoxes.values()) {
+        if (wb.worker?.bot) {
+          visibleCinemaBotHostWorkers.add(wb.worker.bot + '::' + wb.worker.host);
+        }
+      }
       const cinemaConduits = [];
-      const liveWorkerBots = new Set((data.workers || []).filter((w) => w.state === 'working' && w.bot).map((w) => w.bot));
       for (const b of orderedBots) {
         const sb = botBoxes.get(b.name);
         if (!sb) continue;
-        for (const th of botTargetHosts(b)) {
+        const ownHost = b.botHost || 'local';
+        const activeSet = new Set(Array.isArray(b.activeHosts) ? b.activeHosts : []);
+        const targets = botTargetHosts(b);
+        if (ownHost && !targets.includes(ownHost)) targets.unshift(ownHost);
+        for (const th of targets) {
           const hb = hostBoxes.get(th);
           if (!hb) continue;
-          const isBotLive = b.state === 'working' && th === (b.botHost || 'local');
+          const isOwnHost = th === ownHost;
+          if (!isOwnHost && visibleCinemaBotHostWorkers.has(b.name + '::' + th)) continue;
+          let kind = 'standby';
+          let color = squadColor(b.squad);
+          if (isOwnHost) {
+            const isBotLive = b.state === 'working';
+            kind = isBotLive ? 'bot-live' : 'standby';
+            color = isBotLive ? '#ff2a85' : squadColor(b.squad);
+          } else if (activeSet.has(th)) {
+            kind = 'bot-live';
+            color = '#ff2a85';
+          } else {
+            kind = 'history';
+            color = squadColor(b.squad);
+          }
           cinemaConduits.push({
             src: sb.portOut, dst: hb.portIn,
-            color: isBotLive ? '#ff2a85' : squadColor(b.squad),
-            kind: isBotLive ? 'bot-live' : 'standby'
+            color,
+            kind
           });
         }
       }
       for (const w of data.workers || []) {
         if (!w.bot) continue;
         const wb = workerBoxes.get(w.id);
-        const hb = hostBoxes.get(w.host);
-        const dst = wb ? wb.portIn : hb?.portIn;
+        if (!wb) continue;
         const sb = botBoxes.get(w.bot);
-        if (!sb || !dst) continue;
+        if (!sb) continue;
         cinemaConduits.push({
-          src: sb.portOut, dst,
+          src: sb.portOut, dst: wb.portIn,
           color: w.state === 'working' ? '#ff2a85' : w.state === 'succeeded' ? '#00ff9d' : squadColor(w.squad),
           kind: w.state === 'working' ? 'worker-live' : 'worker-recent'
         });
@@ -2668,20 +2747,22 @@
         c.restore();
 
         // Draw Conduits
-        const orderMap = { standby: 0, 'worker-recent': 1, 'bot-live': 2, 'worker-live': 3 };
+        const orderMap = { standby: 0, history: 1, 'worker-recent': 2, 'bot-live': 3, 'worker-live': 4 };
         const sortedC = [...cinemaConduits].sort((a, b) => (orderMap[a.kind] || 0) - (orderMap[b.kind] || 0));
         for (const cd of sortedC) {
           const isLive = cd.kind === 'worker-live' || cd.kind === 'bot-live';
+          const isHistory = cd.kind === 'history';
           const dx = Math.max(120, Math.abs(cd.dst.x - cd.src.x) * 0.48);
           c.save();
           c.beginPath();
           c.moveTo(cd.src.x, cd.src.y);
           c.bezierCurveTo(cd.src.x + dx, cd.src.y, cd.dst.x - dx, cd.dst.y, cd.dst.x, cd.dst.y);
           c.strokeStyle = cd.color;
-          c.globalAlpha = cd.kind === 'standby' ? 0.16 : cd.kind === 'worker-recent' ? 0.46 : 0.92;
-          c.lineWidth = isLive ? 3.2 : cd.kind === 'worker-recent' ? 2.0 : 1.2;
+          c.globalAlpha = cd.kind === 'standby' ? 0.16 : isHistory ? 0.24 : cd.kind === 'worker-recent' ? 0.46 : 0.92;
+          c.lineWidth = isLive ? 3.2 : cd.kind === 'worker-recent' ? 2.0 : isHistory ? 1.3 : 1.2;
           if (isLive) { c.shadowColor = cd.color; c.shadowBlur = 16; }
-          if (cd.kind === 'standby') c.setLineDash([5, 7]);
+          if (isHistory) c.setLineDash([4, 7]);
+          else if (cd.kind === 'standby') c.setLineDash([5, 7]);
           c.stroke();
           c.restore();
         }
@@ -2860,7 +2941,7 @@
           c.textAlign = 'right';
           c.fillText(h.online ? ('ONLINE · ' + h.activeWorkers + 'W') : 'OFFLINE', hb.x + hb.w - 16, hb.y + 24);
 
-          const owner = hostOwnerInfo(h, data.bots || []);
+          const owner = hostOwnerInfo(h, data.bots || [], data.workers || []);
           c.fillStyle = owner.cls === 'gpu' ? '#ffd46b' : owner.cls === 'qa' ? '#cbb2ff' : '#00f0ff';
           c.font = '10px ui-monospace, Menlo, monospace';
           c.textAlign = 'left';

@@ -1133,3 +1133,530 @@ test('preserves bot home-host conduit alongside 2+ remote targets, disambiguates
 
   await worker.deactivate()
 })
+
+test('multi-hop hub relay forwards child.dispatches cleanly and preserves Tier-2/Tier-3 dispatch provenance', async () => {
+  const fs = await import('node:fs/promises')
+  const { fileURLToPath } = await import('node:url')
+  const relayPath = fileURLToPath(new URL('../scripts/hub-relay.mjs', import.meta.url).href)
+  const relaySource = await fs.readFile(relayPath, 'utf8')
+  assert.match(relaySource, /childRelay\?\.host\?\.dispatches/)
+  assert.match(relaySource, /dispatches:\s*childDispatches/)
+  assert.match(relaySource, /dispatches:\s*Array\.isArray\(nc\.dispatches\)/)
+
+  const host = mockHost({
+    results: {
+      'settings.get': { settings: {} },
+      'workspace.list': { workspaces: [], truncated: false }
+    }
+  })
+
+  const mockCli: CliRunner = async (args) => {
+    if (args[0] === 'environment' && args[1] === 'list') {
+      return {
+        environments: [
+          { id: 'env-hub', name: 'hub-mac', endpoints: [{ endpoint: 'ws://100.80.1.2:6768' }] }
+        ]
+      }
+    }
+    return { bots: [], workers: [], worktrees: [], items: [] }
+  }
+
+  const mockMetrics: MetricsRunner = async () => null
+  const now = Date.now()
+  const mockHubHttp: HubRelayClient = {
+    async fetchSnapshot() {
+      return {
+        ok: true,
+        host: {
+          hostname: 'hub-mac',
+          metrics: null,
+          bots: [{ id: 'b-hub', name: 'Orion Copilot', agent: 'antigravity' }],
+          worktrees: [],
+          dispatches: []
+        },
+        children: [
+          {
+            env: { id: 'c-edge', name: 'edge-hub', endpoints: [{ endpoint: 'ws://100.80.2.2:6768' }] },
+            envName: 'edge-hub',
+            ok: true,
+            workers: [],
+            remotePs: [],
+            bots: [{ id: 'b-edge', name: 'Beta Delivery', agent: 'codex' }],
+            dispatches: [
+              {
+                bot: 'Beta Delivery',
+                dispatchId: 'ctx_tier3_1',
+                server: 'gpu-tier3',
+                title: 'Tier-3 CUDA build',
+                state: 'running',
+                startedAt: now - 5_000
+              }
+            ],
+            metrics: null
+          },
+          {
+            env: { id: 'c-t3', name: 'gpu-tier3', endpoints: [{ endpoint: 'ws://100.80.3.3:6768' }] },
+            envName: 'gpu-tier3',
+            viaChain: 'edge-hub',
+            ok: true,
+            workers: [
+              {
+                dispatchId: 'ctx_tier3_1',
+                state: 'working',
+                liveness: 'live',
+                agent: 'codex',
+                workspace: 'r3::/work/beta/cuda-kernel'
+              }
+            ],
+            remotePs: [],
+            bots: [],
+            dispatches: [],
+            metrics: null
+          }
+        ]
+      }
+    },
+    async activateWorktree() { return false }
+  }
+
+  const mod = {
+    default: (orca: Parameters<typeof main.default>[0]) =>
+      main.default(orca, mockCli, mockMetrics, undefined, undefined, undefined, mockHubHttp),
+    deactivate: main.deactivate
+  }
+  const worker = await mountWorker(mod, { host })
+  const snap = await worker.request('hq.getSnapshot')
+
+  const betaBot = snap.bots.find((b) => b.name === 'Beta Delivery')
+  assert.equal(betaBot?.botHost, 'edge-hub')
+  assert.deepEqual(betaBot?.activeHosts, ['gpu-tier3'])
+  assert.ok(betaBot?.targetHosts?.includes('edge-hub'))
+  assert.ok(betaBot?.targetHosts?.includes('gpu-tier3'))
+  const t3Worker = snap.workers.find((w) => w.id === 'ctx_tier3_1')
+  assert.equal(t3Worker?.bot, 'Beta Delivery')
+  assert.equal(t3Worker?.sessionTitle, 'Tier-3 CUDA build')
+
+  await worker.deactivate()
+})
+
+test('resolves remote hub dispatches with server null or local to sourceHost instead of viewing laptop local', async () => {
+  const host = mockHost({
+    results: {
+      'settings.get': { settings: {} },
+      'workspace.list': { workspaces: [], truncated: false }
+    }
+  })
+
+  const now = Date.now()
+  const mockCli: CliRunner = async (args) => {
+    if (args[0] === 'environment' && args[1] === 'list') {
+      return {
+        environments: [
+          { id: 'env-hub', name: 'hub-mac', endpoints: [{ endpoint: 'ws://100.80.1.2:6768' }] }
+        ]
+      }
+    }
+    if (args[0] === 'bot' && args[1] === 'list' && !args.includes('--environment')) {
+      return {
+        bots: [{ id: 'b-local', name: 'Laptop Bot', agent: 'antigravity' }]
+      }
+    }
+    if (args[0] === 'bot' && args[1] === 'work' && args[2] === 'list') {
+      return {
+        items: [
+          { dispatchId: 'd-local-null', server: null, title: 'Local task', state: 'completed', startedAt: now - 10_000 }
+        ]
+      }
+    }
+    return { workers: [], worktrees: [], items: [] }
+  }
+
+  const mockMetrics: MetricsRunner = async () => null
+  const mockHubHttp: HubRelayClient = {
+    async fetchSnapshot() {
+      return {
+        ok: true,
+        host: {
+          hostname: 'hub-mac',
+          metrics: null,
+          bots: [{ id: 'b-hub', name: 'Hub Delivery', agent: 'antigravity' }],
+          worktrees: [
+            { worktreeId: 'folder:hub-del', repo: 'Bots', bot: 'Hub Delivery', botHome: true, status: 'idle', lastActivityAt: now }
+          ],
+          dispatches: [
+            { bot: 'Hub Delivery', dispatchId: 'd-hub-null', server: null, title: 'Hub local build 1', state: 'completed', startedAt: now - 20_000 },
+            { bot: 'Hub Delivery', dispatchId: 'd-hub-local', server: 'local', title: 'Hub local build 2', state: 'running', startedAt: now - 5_000 }
+          ]
+        },
+        children: []
+      }
+    },
+    async activateWorktree() { return false }
+  }
+
+  const mod = {
+    default: (orca: Parameters<typeof main.default>[0]) =>
+      main.default(orca, mockCli, mockMetrics, undefined, undefined, undefined, mockHubHttp),
+    deactivate: main.deactivate
+  }
+  const worker = await mountWorker(mod, { host })
+  const snap = await worker.request('hq.getSnapshot')
+
+  const hubBot = snap.bots.find((b) => b.name === 'Hub Delivery')
+  assert.equal(hubBot?.botHost, 'hub-mac')
+  assert.equal(hubBot?.primaryHost, 'hub-mac')
+  assert.equal(hubBot?.secondaryHost, null)
+  assert.deepEqual(hubBot?.activeHosts, [])
+  assert.deepEqual(hubBot?.recentHosts, [])
+  assert.deepEqual(hubBot?.targetHosts, ['hub-mac'])
+  assert.equal(hubBot?.targetHosts?.includes('local'), false)
+
+  const laptopBot = snap.bots.find((b) => b.name === 'Laptop Bot')
+  assert.equal(laptopBot?.botHost, 'local')
+  assert.equal(laptopBot?.primaryHost, 'local')
+
+  await worker.deactivate()
+})
+
+test('sorts rWorkers before deduping/slicing so working worker at index 15 wins over exited worker at index 0, and scopes workspace-to-bot lookup per host', async () => {
+  const host = mockHost({
+    results: {
+      'settings.get': { settings: {} },
+      'workspace.list': { workspaces: [], truncated: false }
+    }
+  })
+
+  const now = Date.now()
+  const sixteenWorkers = [
+    {
+      dispatchId: 'ctx_old_0',
+      state: 'succeeded',
+      liveness: 'exited',
+      agent: 'codex',
+      workspace: 'repo::/work/alpha/reused-wt'
+    },
+    ...Array.from({ length: 14 }, (_, idx) => ({
+      dispatchId: `ctx_done_${idx + 1}`,
+      state: 'succeeded',
+      liveness: 'exited',
+      agent: 'codex',
+      workspace: `repo::/work/alpha/done-${idx + 1}`
+    })),
+    {
+      dispatchId: 'ctx_live_15',
+      state: 'working',
+      liveness: 'live',
+      agent: 'antigravity/gemini-4-neon',
+      workspace: 'repo::/work/alpha/reused-wt'
+    }
+  ]
+
+  const mockCli: CliRunner = async (args) => {
+    if (args[0] === 'environment' && args[1] === 'list') {
+      return {
+        environments: [
+          { id: 'env-hub', name: 'hub-mac', endpoints: [{ endpoint: 'ws://100.80.1.2:6768' }] }
+        ]
+      }
+    }
+    if (args[0] === 'bot' && args[1] === 'list' && !args.includes('--environment')) {
+      return {
+        bots: [{ id: 'b-local', name: 'Local Shared Bot', agent: 'antigravity' }]
+      }
+    }
+    if (args[0] === 'worktree' && args[1] === 'ps' && !args.includes('--environment')) {
+      return {
+        worktrees: [
+          { worktreeId: 'folder:shared-id', repo: 'Bots', bot: 'Local Shared Bot', botHome: true, status: 'idle', lastActivityAt: now }
+        ]
+      }
+    }
+    return { workers: [], worktrees: [], items: [] }
+  }
+
+  const mockMetrics: MetricsRunner = async () => null
+  const mockHubHttp: HubRelayClient = {
+    async fetchSnapshot() {
+      return {
+        ok: true,
+        host: {
+          hostname: 'hub-mac',
+          metrics: null,
+          bots: [{ id: 'b-hub', name: 'Hub Shared Bot', agent: 'antigravity' }],
+          worktrees: [
+            { worktreeId: 'folder:shared-id', repo: 'Bots', bot: 'Hub Shared Bot', botHome: true, status: 'idle', lastActivityAt: now }
+          ],
+          dispatches: []
+        },
+        children: [
+          {
+            env: { id: 'c-gpu', name: 'gpu-box', endpoints: [{ endpoint: 'ws://100.80.2.10:6768' }] },
+            envName: 'gpu-box',
+            ok: true,
+            workers: sixteenWorkers,
+            remotePs: [
+              {
+                worktreeId: 'repo::/work/alpha/reused-wt',
+                repo: 'alpha',
+                displayName: 'reused-wt',
+                path: '/work/alpha/reused-wt',
+                status: 'working',
+                crossStoreParent: { parent: { workspaceKey: 'folder:shared-id' } },
+                lastActivityAt: now
+              }
+            ],
+            metrics: null
+          }
+        ]
+      }
+    },
+    async activateWorktree() { return false }
+  }
+
+  const mod = {
+    default: (orca: Parameters<typeof main.default>[0]) =>
+      main.default(orca, mockCli, mockMetrics, undefined, undefined, undefined, mockHubHttp),
+    deactivate: main.deactivate
+  }
+  const worker = await mountWorker(mod, { host })
+  const snap = await worker.request('hq.getSnapshot')
+
+  const liveWk = snap.workers.find((w) => w.workspaceId === 'repo::/work/alpha/reused-wt')
+  assert.ok(liveWk, 'working worker at index 15 must be retained')
+  assert.equal(liveWk?.id, 'ctx_live_15')
+  assert.equal(liveWk?.state, 'working')
+  assert.equal(liveWk?.bot, 'Hub Shared Bot')
+  assert.equal(snap.summary.activeWorkers, 1)
+
+  await worker.deactivate()
+})
+
+test('maps worktree status active without working agent to idle so activeWorkers is not falsely inflated', async () => {
+  assert.equal(main.mapWorkerState('active'), 'idle')
+  assert.equal(main.mapWorkerState('active', undefined, 'idle'), 'idle')
+  assert.equal(main.mapWorkerState('active', undefined, 'working'), 'working')
+  assert.equal(main.mapWorkerState('working'), 'working')
+  assert.equal(main.mapWorkerState('succeeded', 'live'), 'succeeded')
+  assert.equal(main.mapWorkerState('idle', 'live'), 'idle')
+  assert.equal(main.mapWorkerState('running', 'live'), 'working')
+
+  const host = mockHost({
+    results: {
+      'settings.get': { settings: {} },
+      'workspace.list': { workspaces: [], truncated: false }
+    }
+  })
+
+  const mockCli: CliRunner = async (args) => {
+    if (args[0] === 'environment' && args[1] === 'list') return { environments: [] }
+    if (args[0] === 'bot' && args[1] === 'list') return { bots: [] }
+    if (args[0] === 'worktree' && args[1] === 'ps') {
+      return {
+        worktrees: [
+          {
+            worktreeId: 'repo::/work/alpha/open-tab',
+            repo: 'alpha',
+            displayName: 'open-tab',
+            path: '/work/alpha/open-tab',
+            status: 'active',
+            agents: [{ state: 'idle', agentType: 'antigravity' }],
+            lastActivityAt: Date.now()
+          }
+        ]
+      }
+    }
+    return { workers: [], worktrees: [], items: [] }
+  }
+
+  const mod = {
+    default: (orca: Parameters<typeof main.default>[0]) =>
+      main.default(orca, mockCli, async () => null, undefined, undefined, undefined, noopHubRelay),
+    deactivate: main.deactivate
+  }
+  const worker = await mountWorker(mod, { host })
+  const snap = await worker.request('hq.getSnapshot')
+
+  assert.equal(snap.summary.activeWorkers, 0)
+  assert.equal(snap.hosts.find((h) => h.id === 'local')?.activeWorkers, 0)
+  const wk = snap.workers.find((w) => w.workspaceId === 'repo::/work/alpha/open-tab')
+  assert.equal(wk?.state, 'idle')
+
+  await worker.deactivate()
+})
+
+test('fairly trims workers per host across 4 hosts with 25+ workers without starving later hosts', async () => {
+  const host = mockHost({
+    results: {
+      'settings.get': { settings: {} },
+      'workspace.list': { workspaces: [], truncated: false }
+    }
+  })
+
+  const now = Date.now()
+  const makePs = (prefix: string, count: number, baseTs: number) =>
+    Array.from({ length: count }, (_, i) => ({
+      worktreeId: `${prefix}::/work/${prefix}/wt-${i}`,
+      repo: prefix,
+      displayName: `${prefix}-wt-${i}`,
+      path: `/work/${prefix}/wt-${i}`,
+      status: 'idle',
+      lastActivityAt: baseTs - i * 100
+    }))
+
+  const mockCli: CliRunner = async (args) => {
+    if (args[0] === 'environment' && args[1] === 'list') {
+      return {
+        environments: [
+          { id: 'e1', name: 'hub-mac', endpoints: [{ endpoint: 'ws://100.80.1.2:6768' }] }
+        ]
+      }
+    }
+    if (args[0] === 'worktree' && args[1] === 'ps' && !args.includes('--environment')) {
+      // Local host has 12 very recent idle worktrees (higher timestamps than remote hosts)
+      return { worktrees: makePs('local', 12, now) }
+    }
+    return { bots: [], workers: [], worktrees: [], items: [] }
+  }
+
+  const mockHubHttp: HubRelayClient = {
+    async fetchSnapshot() {
+      return {
+        ok: true,
+        host: {
+          hostname: 'hub-mac',
+          metrics: null,
+          bots: [],
+          worktrees: makePs('hub', 7, now - 10_000),
+          dispatches: []
+        },
+        children: [
+          {
+            env: { id: 'c1', name: 'gpu-box' },
+            envName: 'gpu-box',
+            ok: true,
+            workers: [],
+            remotePs: makePs('gpu', 7, now - 20_000),
+            metrics: null
+          },
+          {
+            env: { id: 'c2', name: 'qa-box' },
+            envName: 'qa-box',
+            ok: true,
+            workers: [],
+            remotePs: makePs('qa', 7, now - 30_000),
+            metrics: null
+          }
+        ]
+      }
+    },
+    async activateWorktree() { return false }
+  }
+
+  const mod = {
+    default: (orca: Parameters<typeof main.default>[0]) =>
+      main.default(orca, mockCli, async () => null, undefined, undefined, undefined, mockHubHttp),
+    deactivate: main.deactivate
+  }
+  const worker = await mountWorker(mod, { host })
+  const snap = await worker.request('hq.getSnapshot')
+
+  // 33 total worktrees across 4 hosts -> fair trimming retains 5 per host = 20 total (<= 24)
+  assert.ok(snap.workers.length <= 24)
+  assert.equal(snap.workers.filter((w) => w.host === 'local').length, 5)
+  assert.equal(snap.workers.filter((w) => w.host === 'hub-mac').length, 5)
+  assert.equal(snap.workers.filter((w) => w.host === 'gpu-box').length, 5)
+  assert.equal(snap.workers.filter((w) => w.host === 'qa-box').length, 5)
+
+  await worker.deactivate()
+})
+
+test('separates three-tier semantic traffic (6h recency cutoff, activeHosts vs recentHosts) and verifies panel conduit deduplication', async () => {
+  const fs = await import('node:fs/promises')
+  const { fileURLToPath } = await import('node:url')
+  const panelPath = fileURLToPath(new URL('./panel.html', import.meta.url).href)
+  const panelHtml = await fs.readFile(panelPath, 'utf8')
+  assert.match(panelHtml, /function hostOwnerInfo\(h, bots, workers\)/)
+  assert.match(panelHtml, /botTargetHosts\(b\)\.includes\(h\.id\)/)
+  assert.match(panelHtml, /!isOwnHost && visibleBotHostWorkers\.has\(b\.name \+ '::' \+ tHost\)/)
+  assert.match(panelHtml, /!isOwnHost && visibleCinemaBotHostWorkers\.has\(b\.name \+ '::' \+ th\)/)
+  assert.match(panelHtml, /if \(isHistory\) ctx\.setLineDash\(\[4, 7\]\)/)
+  assert.match(panelHtml, /Recent \(≤6h\) →/)
+
+  const host = mockHost({
+    results: {
+      'settings.get': { settings: {} },
+      'workspace.list': { workspaces: [], truncated: false }
+    }
+  })
+
+  const now = Date.now()
+  const sevenHoursAgo = now - 7 * 60 * 60 * 1000
+  const twoHoursAgo = now - 2 * 60 * 60 * 1000
+
+  const mockCli: CliRunner = async (args) => {
+    if (args[0] === 'environment' && args[1] === 'list') {
+      return {
+        environments: [
+          { id: 'env-hub', name: 'hub-mac', endpoints: [{ endpoint: 'ws://100.80.1.2:6768' }] }
+        ]
+      }
+    }
+    return { bots: [], workers: [], worktrees: [], items: [] }
+  }
+
+  const mockHubHttp: HubRelayClient = {
+    async fetchSnapshot() {
+      return {
+        ok: true,
+        host: {
+          hostname: 'hub-mac',
+          metrics: null,
+          bots: [{ id: 'b-orion', name: 'Orion Copilot', agent: 'antigravity' }],
+          worktrees: [
+            { worktreeId: 'folder:orion', repo: 'Bots', bot: 'Orion Copilot', botHome: true, status: 'idle', lastActivityAt: now }
+          ],
+          dispatches: [
+            { bot: 'Orion Copilot', dispatchId: 'd-old', server: 'archive-box', title: 'Old 7h dispatch', state: 'completed', startedAt: sevenHoursAgo },
+            { bot: 'Orion Copilot', dispatchId: 'd-recent', server: 'qa-box', title: 'Recent 2h dispatch', state: 'completed', startedAt: twoHoursAgo },
+            { bot: 'Orion Copilot', dispatchId: 'd-live', server: 'gpu-box', title: 'Active GPU task', state: 'running', startedAt: now - 30_000 }
+          ]
+        },
+        children: [
+          {
+            env: { id: 'c1', name: 'gpu-box' },
+            envName: 'gpu-box',
+            ok: true,
+            workers: [
+              { dispatchId: 'd-live', state: 'working', liveness: 'live', agent: 'antigravity', workspace: 'r1::/work/orion/gpu-live' }
+            ],
+            remotePs: [],
+            metrics: null
+          },
+          { env: { id: 'c2', name: 'qa-box' }, envName: 'qa-box', ok: true, workers: [], remotePs: [], metrics: null },
+          { env: { id: 'c3', name: 'archive-box' }, envName: 'archive-box', ok: true, workers: [], remotePs: [], metrics: null }
+        ]
+      }
+    },
+    async activateWorktree() { return false }
+  }
+
+  const mod = {
+    default: (orca: Parameters<typeof main.default>[0]) =>
+      main.default(orca, mockCli, async () => null, undefined, undefined, undefined, mockHubHttp),
+    deactivate: main.deactivate
+  }
+  const worker = await mountWorker(mod, { host })
+  const snap = await worker.request('hq.getSnapshot')
+
+  const orion = snap.bots.find((b) => b.name === 'Orion Copilot')
+  assert.equal(orion?.botHost, 'hub-mac')
+  assert.deepEqual(orion?.activeHosts, ['gpu-box'])
+  assert.deepEqual(orion?.recentHosts, ['qa-box'])
+  assert.deepEqual(orion?.targetHosts, ['hub-mac', 'gpu-box', 'qa-box'])
+  assert.equal(orion?.targetHosts?.includes('archive-box'), false)
+  assert.equal(orion?.recentHosts?.includes('archive-box'), false)
+  assert.equal(orion?.primaryHost, 'gpu-box')
+  assert.equal(orion?.secondaryHost, 'qa-box')
+
+  await worker.deactivate()
+})

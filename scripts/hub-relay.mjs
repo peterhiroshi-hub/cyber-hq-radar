@@ -428,9 +428,11 @@ function refreshRelaySnapshot(depth = 0, visited = new Set()) {
         ]
         const metrics = childRelay?.host?.metrics ?? sshMetrics ?? null
         const childBots = Array.isArray(childRelay?.host?.bots) ? childRelay.host.bots : []
+        const childDispatches = Array.isArray(childRelay?.host?.dispatches) ? childRelay.host.dispatches : []
         const nested = Array.isArray(childRelay?.children)
           ? childRelay.children.map((nc) => ({
               ...nc,
+              dispatches: Array.isArray(nc.dispatches) ? nc.dispatches : [],
               viaChain: nc.viaChain ? `${envName} -> ${nc.viaChain}` : envName
             }))
           : []
@@ -443,6 +445,7 @@ function refreshRelaySnapshot(depth = 0, visited = new Set()) {
             workers,
             remotePs,
             bots: childBots,
+            dispatches: childDispatches,
             metrics
           },
           nested
