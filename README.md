@@ -6,6 +6,15 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-00f0ff.svg)](./LICENSE)
 [![Orca Plugin](https://img.shields.io/badge/Orca%20Plugin-%3E%3D1.4.274-ff2a85.svg)](https://github.com/stablyai/orca)
 
+![Cyber HQ Radar — All-in-One Fleet Command Wall](./assets/cover.png)
+
+<details>
+<summary>Interactive Spotlight Mode (Click any Compute Machine to Isolate Its Bot-to-Worker Conduits)</summary>
+
+![Cyber HQ Radar — Spotlight Mode](./assets/screenshot-spotlight.png)
+
+</details>
+
 ---
 
 ## Tribute to Orca

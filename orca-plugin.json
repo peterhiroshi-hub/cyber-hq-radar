@@ -2,8 +2,34 @@
   "manifestVersion": 2,
   "id": "cyber-hq-radar",
   "name": "Cyber HQ Radar",
-  "version": "0.1.1",
-  "description": "All-in-one cyberpunk fleet command dashboard for Orca: live Bots, multi-host workers, real-time CPU/RAM/Disk/GPU gauges, session jump, fullscreen wallboard, and 1080p video export.",
+  "version": "0.1.2",
+  "description": "All-in-one cyberpunk fleet command dashboard for Orca: live Bots, multi-host workers, real-time CPU/RAM/Disk/GPU gauges, engine mix icons, fullscreen wallboard, and 1080p video export.",
+  "author": {
+    "name": "peterhiroshi-hub",
+    "url": "https://github.com/peterhiroshi-hub"
+  },
+  "repository": "https://github.com/peterhiroshi-hub/cyber-hq-radar",
+  "homepage": "https://github.com/peterhiroshi-hub/cyber-hq-radar",
+  "license": "MIT",
+  "icon": "assets/icon.png",
+  "cover": {
+    "path": "assets/cover.png",
+    "alt": "Cyber HQ Radar dashboard showing live Orca Bots, 5 AI engine icons, animated mesh conduits, and host CPU/RAM/Disk/GPU gauges"
+  },
+  "screenshots": [
+    {
+      "path": "assets/cover.png",
+      "alt": "All-in-one 3-layer live fleet topology with Bot brains, Engine Mix chart, and real-time host gauges",
+      "caption": "All-in-One Fleet Command Wall: Bot Brains -> Mesh Radar -> Compute Machines & Hosted Workers",
+      "theme": "dark"
+    },
+    {
+      "path": "assets/screenshot-spotlight.png",
+      "alt": "Interactive spotlight mode pinning a GPU node to isolate its dispatching Bots and active worker conduits",
+      "caption": "Interactive Spotlight Mode: pin any machine to trace its exact Bot-to-Worker dispatch conduits",
+      "theme": "dark"
+    }
+  ],
   "engines": {
     "orca": ">=1.4.274"
   },
