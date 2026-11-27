@@ -78,5 +78,5 @@ declare module 'node:http' {
 declare const __dirname: string | undefined
 
 declare const Buffer: {
-  from(input: string, encoding: 'base64' | 'utf8'): Uint8Array & { length: number; toString(encoding?: string): string }
+  from(input: string, encoding: 'base64' | 'utf8' | 'hex'): Uint8Array & { length: number; toString(encoding?: string): string }
 }

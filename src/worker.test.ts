@@ -195,6 +195,46 @@ test('collects multi-host bots, workers, and performance metrics, jumps sessions
   assert.equal(savedVid.saved, true)
   assert.equal(savedVid.format, 'mp4')
 
+  // Verify chunked upload reassembly for large 1080p video exports
+  const c0 = await worker.request('hq.saveVideo', {
+    uploadId: 'u1',
+    chunkIndex: 0,
+    totalChunks: 3,
+    base64: 'AA',
+    mimeType: 'video/webm',
+    filename: 'cyber-hq-chunked.webm',
+    reveal: false
+  })
+  assert.equal(c0.chunkAccepted, true)
+  assert.equal(c0.saved, false)
+  const c1 = await worker.request('hq.saveVideo', {
+    uploadId: 'u1',
+    chunkIndex: 1,
+    totalChunks: 3,
+    base64: 'BB',
+    mimeType: 'video/webm',
+    filename: 'cyber-hq-chunked.webm',
+    reveal: false
+  })
+  assert.equal(c1.chunkAccepted, true)
+  const c2 = await worker.request('hq.saveVideo', {
+    uploadId: 'u1',
+    chunkIndex: 2,
+    totalChunks: 3,
+    base64: 'CC',
+    mimeType: 'video/webm',
+    filename: 'cyber-hq-chunked.webm',
+    reveal: false
+  })
+  assert.equal(c2.saved, true)
+  assert.equal(c2.format, 'webm')
+
+  // Verify stripBase64DataUrl correctly strips data URLs containing ;codecs=...;base64,
+  const sampleBytes = Buffer.from('000000186674797069736f6d0000020069736f6d', 'hex')
+  const codecDataUrl = `data:video/mp4;codecs=avc1.640028;base64,${sampleBytes.toString('base64')}`
+  const stripped = main.stripBase64DataUrl(codecDataUrl)
+  assert.equal(Buffer.from(stripped, 'base64').length, sampleBytes.length)
+
   const wall = await worker.request('hq.openFullscreenWall')
   assert.equal(wall.opened, true)
   assert.ok(wall.url && wall.url.startsWith('http://127.0.0.1:'))

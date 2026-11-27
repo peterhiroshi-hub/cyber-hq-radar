@@ -119,6 +119,9 @@ export type SaveVideoInput = {
   mimeType: string
   filename?: string
   reveal?: boolean
+  uploadId?: string
+  chunkIndex?: number
+  totalChunks?: number
 }
 
 export type SaveVideoOutput = {
@@ -126,6 +129,7 @@ export type SaveVideoOutput = {
   path: string | null
   bytes: number
   format: 'mp4' | 'webm'
+  chunkAccepted?: boolean
   error?: string
 }
 

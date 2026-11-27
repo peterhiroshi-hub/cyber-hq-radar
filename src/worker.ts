@@ -140,10 +140,14 @@ export async function defaultWallOpener(url: string): Promise<boolean> {
   }
 }
 
+export function stripBase64DataUrl(input: string | undefined | null): string {
+  return String(input || '').replace(/^data:[^,]*;base64,/i, '').trim()
+}
+
 export async function defaultVideoSaver(input: SaveVideoInput): Promise<SaveVideoOutput> {
   const isMp4 = (input.mimeType || '').toLowerCase().includes('mp4')
   const format: 'mp4' | 'webm' = isMp4 ? 'mp4' : 'webm'
-  const rawBase64 = (input.base64 || '').replace(/^data:[^;]+;base64,/, '')
+  const rawBase64 = stripBase64DataUrl(input.base64)
   if (!rawBase64) {
     return { saved: false, path: null, bytes: 0, format, error: 'Empty video payload' }
   }
@@ -160,7 +164,7 @@ export async function defaultVideoSaver(input: SaveVideoInput): Promise<SaveVide
   await fs.mkdir(downloadsDir, { recursive: true })
   const outPath = path.join(downloadsDir, finalName)
   await fs.writeFile(outPath, bytesBuf)
-  if (input.reveal !== false) {
+  if (input.reveal !== false && os.platform() === 'darwin') {
     await execFileAsync('open', ['-R', outPath], { timeout: 3000 }).catch(() => null)
   }
   return { saved: true, path: outPath, bytes: bytesBuf.length, format }
@@ -1247,20 +1251,70 @@ export default function activate(
     return { opened: false, mode: 'none', detail: `Could not open session on ${host}` }
   }
 
+  const pendingVideoUploads = new Map<
+    string,
+    { chunks: (string | undefined)[]; received: number; total: number; totalLen: number; createdAt: number }
+  >()
+
   const handleSaveVideo = async (input: SaveVideoInput): Promise<SaveVideoOutput> => {
+    const format: 'mp4' | 'webm' = (input?.mimeType || '').toLowerCase().includes('mp4') ? 'mp4' : 'webm'
     try {
-      const out = await videoSaver(input)
+      const now = Date.now()
+      for (const [id, entry] of pendingVideoUploads.entries()) {
+        if (now - entry.createdAt > 120_000) pendingVideoUploads.delete(id)
+      }
+
+      let finalInput: SaveVideoInput = input
+      if (input?.uploadId && typeof input.totalChunks === 'number' && input.totalChunks > 1) {
+        const total = Math.floor(input.totalChunks)
+        const idx = Math.floor(input.chunkIndex ?? -1)
+        if (total > 512 || idx < 0 || idx >= total) {
+          return { saved: false, path: null, bytes: 0, format, error: 'Invalid video chunk metadata' }
+        }
+        let slot = pendingVideoUploads.get(input.uploadId)
+        if (!slot) {
+          slot = { chunks: new Array(total), received: 0, total, totalLen: 0, createdAt: now }
+          pendingVideoUploads.set(input.uploadId, slot)
+        }
+        if (slot.total !== total) {
+          pendingVideoUploads.delete(input.uploadId)
+          return { saved: false, path: null, bytes: 0, format, error: 'Mismatched video chunk total' }
+        }
+        const piece = typeof input.base64 === 'string' ? input.base64 : ''
+        if (slot.chunks[idx] === undefined) {
+          slot.received += 1
+          slot.totalLen += piece.length
+        }
+        if (slot.totalLen > 90 * 1024 * 1024) {
+          pendingVideoUploads.delete(input.uploadId)
+          return { saved: false, path: null, bytes: 0, format, error: 'Video upload exceeds size limit' }
+        }
+        slot.chunks[idx] = piece
+        if (slot.received < slot.total) {
+          return { saved: false, path: null, bytes: 0, format, chunkAccepted: true }
+        }
+        pendingVideoUploads.delete(input.uploadId)
+        finalInput = {
+          base64: slot.chunks.join(''),
+          mimeType: input.mimeType,
+          filename: input.filename,
+          reveal: input.reveal
+        }
+      }
+
+      const out = await videoSaver(finalInput)
       if (out.saved && out.path) {
         const mb = (out.bytes / (1024 * 1024)).toFixed(2)
         pushLog('system', `EXPORTED VIDEO (${out.format.toUpperCase()} · ${mb}MB) :: ${path.basename(out.path)}`)
       }
       return out
     } catch (err) {
+      if (input?.uploadId) pendingVideoUploads.delete(input.uploadId)
       return {
         saved: false,
         path: null,
         bytes: 0,
-        format: (input?.mimeType || '').includes('mp4') ? 'mp4' : 'webm',
+        format,
         error: err instanceof Error ? err.message : 'Save video failed'
       }
     }

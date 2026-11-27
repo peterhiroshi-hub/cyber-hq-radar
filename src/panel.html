@@ -1985,20 +1985,22 @@
   // =========================================================================
   // ONE-CLICK 1920x1080 CINEMA SHOWCASE VIDEO EXPORTER (REAL LIVE DATA)
   // =========================================================================
-  function pickRecorderMime() {
-    if (typeof MediaRecorder === 'undefined') return null;
+  function pickRecorderMimes() {
+    if (typeof MediaRecorder === 'undefined') return [];
     const candidates = [
-      'video/mp4;codecs=avc1.42E01E',
+      'video/mp4;codecs=avc1.640028',
+      'video/mp4;codecs=avc1.42E028',
       'video/mp4;codecs=avc1',
       'video/mp4',
       'video/webm;codecs=vp9',
       'video/webm;codecs=vp8',
       'video/webm'
     ];
-    for (const m of candidates) {
-      if (MediaRecorder.isTypeSupported(m)) return m;
-    }
-    return '';
+    const supported = candidates.filter((m) => {
+      try { return MediaRecorder.isTypeSupported(m); } catch { return false; }
+    });
+    supported.push('');
+    return supported;
   }
 
   function roundRect(c, x, y, w, h, r) {
@@ -2063,11 +2065,57 @@
     });
   }
 
+  function triggerBrowserDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+
+  async function saveVideoChunked(base64Raw, outMime, fname) {
+    const clean = String(base64Raw || '').replace(/^data:[^,]*;base64,/i, '');
+    if (!clean) throw new Error('Empty encoded video payload');
+    const CHUNK_SIZE = 256 * 1024;
+    if (clean.length <= CHUNK_SIZE) {
+      return apiRequest('hq.saveVideo', {
+        base64: clean,
+        mimeType: outMime,
+        filename: fname,
+        reveal: true
+      });
+    }
+    const uploadId = 'vid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    const totalChunks = Math.ceil(clean.length / CHUNK_SIZE);
+    let lastRes = null;
+    for (let i = 0; i < totalChunks; i++) {
+      const pct = Math.min(99, Math.round(((i + 1) / totalChunks) * 100));
+      recBtn.textContent = 'SAVING ' + pct + '%';
+      const slice = clean.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+      lastRes = await apiRequest('hq.saveVideo', {
+        uploadId,
+        chunkIndex: i,
+        totalChunks,
+        base64: slice,
+        mimeType: outMime,
+        filename: fname,
+        reveal: true
+      });
+      if (!lastRes || (i < totalChunks - 1 && !lastRes.chunkAccepted && !lastRes.saved)) {
+        throw new Error(lastRes?.error || 'Chunk upload rejected');
+      }
+    }
+    return lastRes;
+  }
+
   async function exportCinemaVideo() {
     if (isRecording || !snap) return;
-    const mimeType = pickRecorderMime();
-    if (mimeType === null) {
-      showToast('! MediaRecorder unavailable');
+    const mimeCandidates = pickRecorderMimes();
+    if (!mimeCandidates.length) {
+      showToast('! 当前运行环境不支持 MediaRecorder 录屏');
       return;
     }
 
@@ -2075,631 +2123,717 @@
     recBtn.disabled = true;
     recBtn.classList.add('recording');
 
-    const W = 1920, H = 1080;
-    const DURATION_MS = 8000;
-    const FPS = 30;
-    const off = document.createElement('canvas');
-    off.width = W;
-    off.height = H;
-    const c = off.getContext('2d');
-
-    const data = JSON.parse(JSON.stringify(snap));
-    const orderedBots = orderBotGroups(data.bots || []).flatMap((g) => g.bots);
-    const sortedHosts = sortHostsForDeck(data.hosts || []);
-
-    // Precompute 1920x1080 Cinema Layout Coordinates
-    const botBoxes = new Map();
-    const botLeftX = 56, botW = 430;
-    let curY = 172;
-    const squadBreaks = new Set();
-    let prevSquad = null;
-    const botH = Math.min(58, Math.floor((820 - orderedBots.length * 6) / Math.max(1, orderedBots.length)));
-    for (const b of orderedBots) {
-      if (prevSquad && prevSquad !== b.squad) {
-        squadBreaks.add(curY + 4);
-        curY += 20;
+    try {
+      const W = 1920, H = 1080;
+      const DURATION_MS = 8000;
+      const FPS = 30;
+      const off = document.createElement('canvas');
+      off.width = W;
+      off.height = H;
+      const c = off.getContext('2d');
+      if (!c || typeof off.captureStream !== 'function') {
+        throw new Error('Canvas captureStream unavailable');
       }
-      prevSquad = b.squad;
-      botBoxes.set(b.name, {
-        bot: b, x: botLeftX, y: curY, w: botW, h: botH,
-        portOut: { x: botLeftX + botW, y: curY + botH / 2 }
-      });
-      curY += botH + 7;
-    }
 
-    const hostBoxes = new Map();
-    const workerBoxes = new Map();
-    const hostX = 1130, hostW = 736;
-    const podGap = 16;
-    const podHeights = sortedHosts.map((h) => (h.metrics?.gpu ? 324 : 268));
-    let hy = 128;
-    sortedHosts.forEach((h, idx) => {
-      const ph = podHeights[idx] || 268;
-      const hWorkers = (data.workers || []).filter((w) => w.host === h.id).slice(0, 3);
-      hostBoxes.set(h.id, {
-        host: h, x: hostX, y: hy, w: hostW, h: ph,
-        portIn: { x: hostX, y: hy + 40 },
-        workers: hWorkers
-      });
-      const wStartY = hy + (h.metrics?.gpu ? 194 : 158);
-      const wSlotH = 38;
-      hWorkers.forEach((wk, wi) => {
-        const wy = wStartY + wi * (wSlotH + 5);
-        workerBoxes.set(wk.id, {
-          worker: wk, x: hostX + 14, y: wy, w: hostW - 28, h: wSlotH,
-          portIn: { x: hostX, y: wy + wSlotH / 2 }
+      const data = JSON.parse(JSON.stringify(snap));
+      const orderedBots = orderBotGroups(data.bots || []).flatMap((g) => g.bots);
+      const sortedHosts = sortHostsForDeck(data.hosts || []);
+      const botHostCount = new Set((data.bots || []).map((b) => b.botHost || data.controlHostId || 'local')).size;
+
+      // Dynamic 1920x1080 Cinema Layout Coordinates (zero overflow for 1..24 bots & 1..6 hosts)
+      const botBoxes = new Map();
+      const botLeftX = 56, botW = 430;
+      let squadBreaksCount = 0;
+      for (let i = 1; i < orderedBots.length; i++) {
+        if (orderedBots[i].squad !== orderedBots[i - 1].squad) squadBreaksCount++;
+      }
+      const sqGap = orderedBots.length > 12 ? 10 : 16;
+      const rowGap = orderedBots.length > 12 ? 4 : 7;
+      const availBotH = 816;
+      const botH = Math.max(
+        28,
+        Math.min(58, Math.floor((availBotH - squadBreaksCount * sqGap - Math.max(0, orderedBots.length - 1) * rowGap) / Math.max(1, orderedBots.length)))
+      );
+      let curY = 160;
+      let prevSquad = null;
+      for (const b of orderedBots) {
+        if (prevSquad && prevSquad !== b.squad) curY += sqGap;
+        prevSquad = b.squad;
+        botBoxes.set(b.name, {
+          bot: b, x: botLeftX, y: curY, w: botW, h: botH,
+          portOut: { x: botLeftX + botW, y: curY + botH / 2 }
         });
-      });
-      hy += ph + podGap;
-    });
+        curY += botH + rowGap;
+      }
 
-    // Build Cinema Conduits
-    const cinemaConduits = [];
-    const liveWorkerBots = new Set((data.workers || []).filter((w) => w.state === 'working' && w.bot).map((w) => w.bot));
-    for (const b of orderedBots) {
-      const sb = botBoxes.get(b.name);
-      if (!sb) continue;
-      for (const th of [b.primaryHost, b.secondaryHost].filter(Boolean)) {
-        const hb = hostBoxes.get(th);
-        if (!hb) continue;
-        const isBotLive = b.state === 'working' && !liveWorkerBots.has(b.name) && th === (b.botHost || 'local');
-        cinemaConduits.push({
-          src: sb.portOut, dst: hb.portIn,
-          color: isBotLive ? '#ff2a85' : squadColor(b.squad),
-          kind: isBotLive ? 'bot-live' : 'standby'
+      const hostBoxes = new Map();
+      const workerBoxes = new Map();
+      const hostX = 1130, hostW = 754;
+      const availHostH = 876;
+      const hostCount = Math.max(1, sortedHosts.length);
+      const podGap = hostCount >= 4 ? 10 : 16;
+      const weights = sortedHosts.map((h) => (h.metrics?.gpu ? 1.18 : 1.0));
+      const totalWeight = weights.reduce((a, b) => a + b, 0) || 1;
+      const usableH = availHostH - (hostCount - 1) * podGap;
+      const podHeights = sortedHosts.map((_, idx) => {
+        const raw = Math.floor((usableH * weights[idx]) / totalWeight);
+        return Math.min(hostCount <= 2 ? 360 : 324, Math.max(132, raw));
+      });
+      let hy = 114;
+      sortedHosts.forEach((h, idx) => {
+        const ph = podHeights[idx] || 200;
+        const compactPod = ph < 225;
+        const gaugeR = ph < 185 ? 20 : compactPod ? 24 : ph < 265 ? 28 : 33;
+        const gaugeCy = 46 + gaugeR + 6;
+        const wStartOffset = h.metrics ? (gaugeCy + gaugeR + 38) : 56;
+        const wSlotH = compactPod ? 29 : 36;
+        const maxWorkers = Math.max(0, Math.min(3, Math.floor((ph - wStartOffset - 8) / (wSlotH + 4))));
+        const hWorkers = (data.workers || []).filter((w) => w.host === h.id).slice(0, maxWorkers);
+        hostBoxes.set(h.id, {
+          host: h, x: hostX, y: hy, w: hostW, h: ph,
+          gaugeR, gaugeCy, wSlotH,
+          portIn: { x: hostX, y: hy + 34 },
+          workers: hWorkers
         });
-      }
-    }
-    for (const w of data.workers || []) {
-      const wb = workerBoxes.get(w.id);
-      const hb = hostBoxes.get(w.host);
-      const dst = wb ? wb.portIn : hb?.portIn;
-      const botName = w.bot || (data.bots.find((b) => b.squad === w.squad)?.name) || (data.bots[0]?.name || '');
-      const sb = botBoxes.get(botName);
-      if (!sb || !dst) continue;
-      cinemaConduits.push({
-        src: sb.portOut, dst,
-        color: w.state === 'working' ? '#ff2a85' : w.state === 'succeeded' ? '#00ff9d' : squadColor(w.squad),
-        kind: w.state === 'working' ? 'worker-live' : 'worker-recent'
+        const wStartY = hy + wStartOffset;
+        hWorkers.forEach((wk, wi) => {
+          const wy = wStartY + wi * (wSlotH + 4);
+          workerBoxes.set(wk.id, {
+            worker: wk, x: hostX + 14, y: wy, w: hostW - 28, h: wSlotH,
+            portIn: { x: hostX, y: wy + wSlotH / 2 }
+          });
+        });
+        hy += ph + podGap;
       });
-    }
 
-    const cinPackets = [];
-    const cinRipples = [];
-    const cinMotes = Array.from({ length: 48 }, (_, i) => ({
-      x: 500 + ((i * 73) % 610),
-      y: 120 + ((i * 119) % 860),
-      vy: -0.55 - (i % 4) * 0.35,
-      r: 1.2 + (i % 3) * 0.9,
-      col: i % 3 === 0 ? '#00f0ff' : i % 3 === 1 ? '#ff2a85' : '#a77bff'
-    }));
-
-    const stream = off.captureStream(FPS);
-    const chunks = [];
-    const recorder = new MediaRecorder(stream, {
-      ...(mimeType ? { mimeType } : {}),
-      videoBitsPerSecond: 8000000
-    });
-    recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
-
-    const donePromise = new Promise((resolve) => {
-      recorder.onstop = () => resolve(new Blob(chunks, { type: recorder.mimeType || mimeType || 'video/webm' }));
-    });
-
-    recorder.start(250);
-    const startMs = performance.now();
-    let frameIdx = 0;
-
-    function drawCinemaFrame(now) {
-      const elapsed = now - startMs;
-      const progress = Math.min(1, elapsed / DURATION_MS);
-      const remSec = Math.max(0, Math.ceil((DURATION_MS - elapsed) / 1000));
-      recBtn.textContent = '● REC ' + remSec + 's';
-
-      const introEase = 1 - Math.pow(1 - Math.min(1, elapsed / 1100), 3);
-      const tSec = elapsed / 1000;
-
-      // Background nebula + cyber grid
-      const bg = c.createLinearGradient(0, 0, 0, H);
-      bg.addColorStop(0, '#02060f');
-      bg.addColorStop(1, '#071024');
-      c.fillStyle = bg;
-      c.fillRect(0, 0, W, H);
-
-      const glow1 = c.createRadialGradient(340, 180, 10, 340, 180, 560);
-      glow1.addColorStop(0, 'rgba(0, 240, 255, 0.14)');
-      glow1.addColorStop(1, 'rgba(0, 240, 255, 0)');
-      c.fillStyle = glow1;
-      c.fillRect(0, 0, W, H);
-
-      const glow2 = c.createRadialGradient(1560, 420, 10, 1560, 420, 620);
-      glow2.addColorStop(0, 'rgba(255, 42, 133, 0.13)');
-      glow2.addColorStop(1, 'rgba(255, 42, 133, 0)');
-      c.fillStyle = glow2;
-      c.fillRect(0, 0, W, H);
-
-      // Subtle cyber grid
-      c.strokeStyle = 'rgba(0, 240, 255, 0.04)';
-      c.lineWidth = 1;
-      for (let gx = 0; gx < W; gx += 40) {
-        c.beginPath(); c.moveTo(gx, 0); c.lineTo(gx, H); c.stroke();
-      }
-      for (let gy = 0; gy < H; gy += 40) {
-        c.beginPath(); c.moveTo(0, gy); c.lineTo(W, gy); c.stroke();
-      }
-
-      // Top Cinema Command Header
-      roundRect(c, 36, 26, W - 72, 76, 12);
-      c.fillStyle = 'rgba(8, 16, 34, 0.92)';
-      c.fill();
-      c.strokeStyle = 'rgba(0, 240, 255, 0.34)';
-      c.lineWidth = 1.5;
-      c.stroke();
-
-      c.save();
-      c.beginPath();
-      c.arc(70, 64, 8, 0, Math.PI * 2);
-      c.fillStyle = '#00f0ff';
-      c.shadowColor = '#00f0ff';
-      c.shadowBlur = 18;
-      c.fill();
-      c.restore();
-
-      c.fillStyle = '#00f0ff';
-      c.font = 'bold 24px ui-monospace, Menlo, monospace';
-      c.textAlign = 'left';
-      c.fillText('CYBER HQ // ALL-IN-ONE FLEET COMMAND WALL', 94, 59);
-      c.fillStyle = '#7b95b8';
-      c.font = '13px ui-monospace, Menlo, monospace';
-      const ctrlLbl = data.controlHostLabel || 'CONTROL';
-      c.fillText('LIVE MULTI-HOST TOPOLOGY · BOT BRAINS (@' + ctrlLbl + ') → ORCA MESH → COMPUTE MACHINES & WORKERS', 94, 83);
-
-      // Right KPI chips + REC timecode
-      const recBlink = Math.floor(tSec * 2) % 2 === 0;
-      const kpis = [
-        { l: 'BOTS', v: data.summary.workingBots + '/' + data.summary.totalBots, col: '#00f0ff' },
-        { l: 'NODES', v: data.summary.onlineHosts + '/' + data.hosts.length, col: '#00ff9d' },
-        { l: 'ACTIVE', v: String(data.summary.activeWorkers), col: '#ff2a85' }
-      ];
-      let kx = 1320;
-      for (const kp of kpis) {
-        roundRect(c, kx, 42, 126, 44, 8);
-        c.fillStyle = 'rgba(11, 22, 46, 0.95)';
-        c.fill();
-        c.strokeStyle = 'rgba(0, 240, 255, 0.25)';
-        c.stroke();
-        c.fillStyle = '#7b95b8';
-        c.font = '11px ui-monospace, Menlo, monospace';
-        c.fillText(kp.l, kx + 12, 60);
-        c.fillStyle = kp.col;
-        c.font = 'bold 18px ui-monospace, Menlo, monospace';
-        c.fillText(kp.v, kx + 12, 79);
-        kx += 138;
-      }
-      // REC timecode badge
-      roundRect(c, 1742, 42, 124, 44, 8);
-      c.fillStyle = 'rgba(255, 42, 133, 0.16)';
-      c.fill();
-      c.strokeStyle = '#ff2a85';
-      c.stroke();
-      c.beginPath();
-      c.arc(1760, 64, 5, 0, Math.PI * 2);
-      c.fillStyle = recBlink ? '#ff2a85' : 'rgba(255, 42, 133, 0.3)';
-      c.fill();
-      c.fillStyle = '#fff';
-      c.font = 'bold 14px ui-monospace, Menlo, monospace';
-      c.fillText('00:0' + Math.min(8, Math.floor(tSec)) + '.' + Math.floor((tSec % 1) * 10), 1774, 69);
-
-      // Center Arena: Motes + Triple Counter-Rotating Holographic Radar + Oscilloscope
-      const rcx = 810, rcy = 510, rMax = 215;
-      for (const m of cinMotes) {
-        m.y += m.vy;
-        if (m.y < 120) m.y = 980;
-        c.save();
-        c.beginPath();
-        c.arc(m.x, m.y, m.r, 0, Math.PI * 2);
-        c.fillStyle = m.col;
-        c.globalAlpha = 0.35 + 0.2 * Math.sin(tSec * 3 + m.x);
-        c.fill();
-        c.restore();
-      }
-
-      c.save();
-      for (let i = 1; i <= 4; i++) {
-        const rr = (rMax / 4) * i;
-        c.beginPath();
-        c.arc(rcx, rcy, rr, 0, Math.PI * 2);
-        c.strokeStyle = i === 4 ? 'rgba(0, 240, 255, 0.24)' : 'rgba(0, 240, 255, 0.11)';
-        c.lineWidth = 1.4;
-        if (i === 2 || i === 3) c.setLineDash([7, 8]);
-        else c.setLineDash([]);
-        c.stroke();
-      }
-      c.setLineDash([]);
-      c.save();
-      c.translate(rcx, rcy);
-      c.rotate(-tSec * 0.45);
-      for (let k = 0; k < 24; k++) {
-        const a = (k / 24) * Math.PI * 2;
-        c.beginPath();
-        c.moveTo(Math.cos(a) * (rMax - 8), Math.sin(a) * (rMax - 8));
-        c.lineTo(Math.cos(a) * (rMax + 6), Math.sin(a) * (rMax + 6));
-        c.strokeStyle = k % 2 === 0 ? 'rgba(0, 240, 255, 0.4)' : 'rgba(0, 240, 255, 0.18)';
-        c.lineWidth = k % 2 === 0 ? 2 : 1;
-        c.stroke();
-      }
-      c.restore();
-
-      const swA = (tSec * 1.45) % (Math.PI * 2);
-      const rg = c.createRadialGradient(rcx, rcy, 4, rcx, rcy, rMax);
-      rg.addColorStop(0, 'rgba(0, 240, 255, 0.30)');
-      rg.addColorStop(0.65, 'rgba(0, 240, 255, 0.10)');
-      rg.addColorStop(1, 'rgba(0, 240, 255, 0)');
-      c.beginPath();
-      c.moveTo(rcx, rcy);
-      c.arc(rcx, rcy, rMax, swA - 0.72, swA);
-      c.closePath();
-      c.fillStyle = rg;
-      c.fill();
-
-      c.beginPath();
-      c.arc(rcx, rcy, 7, 0, Math.PI * 2);
-      c.fillStyle = '#00f0ff';
-      c.shadowColor = '#00f0ff';
-      c.shadowBlur = 18;
-      c.fill();
-      c.restore();
-
-      // Tailscale Mesh Label & Live Oscilloscope
-      roundRect(c, rcx - 98, 128, 196, 28, 14);
-      c.fillStyle = 'rgba(5, 13, 30, 0.85)';
-      c.fill();
-      c.strokeStyle = 'rgba(0, 240, 255, 0.38)';
-      c.stroke();
-      c.fillStyle = '#00f0ff';
-      c.font = 'bold 12px ui-monospace, Menlo, monospace';
-      c.textAlign = 'center';
-      c.fillText('TAILSCALE WARP MESH', rcx, 146);
-
-      // Oscilloscope wave
-      const ow = 360, ox = rcx - ow / 2, oy = 930;
-      const amp = 12 + Math.min(18, (data.summary.activeWorkers || 0) * 6);
-      c.save();
-      c.beginPath();
-      for (let i = 0; i <= 72; i++) {
-        const px = ox + (i / 72) * ow;
-        const env = Math.sin((i / 72) * Math.PI);
-        const py = oy + Math.sin(i * 0.45 - tSec * 7) * amp * env + Math.cos(i * 1.1 + tSec * 11) * amp * 0.35 * env;
-        if (i === 0) c.moveTo(px, py);
-        else c.lineTo(px, py);
-      }
-      c.strokeStyle = (data.summary.activeWorkers || 0) > 0 ? '#ff2a85' : '#00f0ff';
-      c.lineWidth = 2.2;
-      c.shadowColor = c.strokeStyle;
-      c.shadowBlur = 12;
-      c.stroke();
-      c.restore();
-
-      // Draw Conduits
-      const orderMap = { standby: 0, 'worker-recent': 1, 'bot-live': 2, 'worker-live': 3 };
-      const sortedC = [...cinemaConduits].sort((a, b) => (orderMap[a.kind] || 0) - (orderMap[b.kind] || 0));
-      for (const cd of sortedC) {
-        const isLive = cd.kind === 'worker-live' || cd.kind === 'bot-live';
-        const dx = Math.max(120, Math.abs(cd.dst.x - cd.src.x) * 0.48);
-        c.save();
-        c.beginPath();
-        c.moveTo(cd.src.x, cd.src.y);
-        c.bezierCurveTo(cd.src.x + dx, cd.src.y, cd.dst.x - dx, cd.dst.y, cd.dst.x, cd.dst.y);
-        c.strokeStyle = cd.color;
-        c.globalAlpha = cd.kind === 'standby' ? 0.16 : cd.kind === 'worker-recent' ? 0.46 : 0.92;
-        c.lineWidth = isLive ? 3.2 : cd.kind === 'worker-recent' ? 2.0 : 1.2;
-        if (isLive) { c.shadowColor = cd.color; c.shadowBlur = 16; }
-        if (cd.kind === 'standby') c.setLineDash([5, 7]);
-        c.stroke();
-        c.restore();
-      }
-
-      // Cinema Packets + Comet Trails + Ripples
-      const liveC = sortedC.filter((x) => x.kind === 'worker-live' || x.kind === 'bot-live');
-      const recC = sortedC.filter((x) => x.kind === 'worker-recent');
-      if (liveC.length && frameIdx % 4 === 0) {
-        const pick = liveC[(frameIdx / 4) % liveC.length | 0];
-        cinPackets.push({ src: pick.src, dst: pick.dst, t: 0, speed: 0.024, color: pick.color, hot: true });
-      }
-      if (recC.length && frameIdx % 14 === 0) {
-        const pick = recC[(frameIdx / 14) % recC.length | 0];
-        cinPackets.push({ src: pick.src, dst: pick.dst, t: 0, speed: 0.016, color: pick.color, hot: false });
-      }
-      for (let i = cinPackets.length - 1; i >= 0; i--) {
-        const p = cinPackets[i];
-        p.t += p.speed;
-        if (p.t >= 1) {
-          if (p.hot) cinRipples.push({ x: p.dst.x, y: p.dst.y, r: 4, maxR: 28, alpha: 0.9, color: p.color });
-          cinPackets.splice(i, 1);
-          continue;
+      // Build Cinema Conduits
+      const cinemaConduits = [];
+      const liveWorkerBots = new Set((data.workers || []).filter((w) => w.state === 'working' && w.bot).map((w) => w.bot));
+      for (const b of orderedBots) {
+        const sb = botBoxes.get(b.name);
+        if (!sb) continue;
+        for (const th of [b.primaryHost, b.secondaryHost].filter(Boolean)) {
+          const hb = hostBoxes.get(th);
+          if (!hb) continue;
+          const isBotLive = b.state === 'working' && !liveWorkerBots.has(b.name) && th === (b.botHost || 'local');
+          cinemaConduits.push({
+            src: sb.portOut, dst: hb.portIn,
+            color: isBotLive ? '#ff2a85' : squadColor(b.squad),
+            kind: isBotLive ? 'bot-live' : 'standby'
+          });
         }
-        const ptAt = (tt) => {
-          const dx = Math.max(120, Math.abs(p.dst.x - p.src.x) * 0.48);
-          const c1x = p.src.x + dx, c1y = p.src.y, c2x = p.dst.x - dx, c2y = p.dst.y;
-          const it = 1 - tt;
-          return {
-            x: it*it*it*p.src.x + 3*it*it*tt*c1x + 3*it*tt*tt*c2x + tt*tt*tt*p.dst.x,
-            y: it*it*it*p.src.y + 3*it*it*tt*c1y + 3*it*tt*tt*c2y + tt*tt*tt*p.dst.y
-          };
-        };
-        for (let k = 4; k >= 1; k--) {
-          const tp = ptAt(Math.max(0, p.t - k * 0.022));
+      }
+      for (const w of data.workers || []) {
+        const wb = workerBoxes.get(w.id);
+        const hb = hostBoxes.get(w.host);
+        const dst = wb ? wb.portIn : hb?.portIn;
+        const botName = w.bot || (data.bots.find((b) => b.squad === w.squad)?.name) || (data.bots[0]?.name || '');
+        const sb = botBoxes.get(botName);
+        if (!sb || !dst) continue;
+        cinemaConduits.push({
+          src: sb.portOut, dst,
+          color: w.state === 'working' ? '#ff2a85' : w.state === 'succeeded' ? '#00ff9d' : squadColor(w.squad),
+          kind: w.state === 'working' ? 'worker-live' : 'worker-recent'
+        });
+      }
+
+      const cinPackets = [];
+      const cinRipples = [];
+      const cinMotes = Array.from({ length: 48 }, (_, i) => ({
+        x: 500 + ((i * 73) % 610),
+        y: 120 + ((i * 119) % 860),
+        vy: -0.55 - (i % 4) * 0.35,
+        r: 1.2 + (i % 3) * 0.9,
+        col: i % 3 === 0 ? '#00f0ff' : i % 3 === 1 ? '#ff2a85' : '#a77bff'
+      }));
+
+      let frameIdx = 0;
+
+      function renderCinemaAt(elapsed) {
+        const remSec = Math.max(0, Math.ceil((DURATION_MS - elapsed) / 1000));
+        recBtn.textContent = '● REC ' + remSec + 's';
+
+        const introEase = 1 - Math.pow(1 - Math.min(1, elapsed / 1100), 3);
+        const tSec = elapsed / 1000;
+
+        // Background nebula + cyber grid
+        const bg = c.createLinearGradient(0, 0, 0, H);
+        bg.addColorStop(0, '#02060f');
+        bg.addColorStop(1, '#071024');
+        c.fillStyle = bg;
+        c.fillRect(0, 0, W, H);
+
+        const glow1 = c.createRadialGradient(340, 180, 10, 340, 180, 560);
+        glow1.addColorStop(0, 'rgba(0, 240, 255, 0.14)');
+        glow1.addColorStop(1, 'rgba(0, 240, 255, 0)');
+        c.fillStyle = glow1;
+        c.fillRect(0, 0, W, H);
+
+        const glow2 = c.createRadialGradient(1560, 420, 10, 1560, 420, 620);
+        glow2.addColorStop(0, 'rgba(255, 42, 133, 0.13)');
+        glow2.addColorStop(1, 'rgba(255, 42, 133, 0)');
+        c.fillStyle = glow2;
+        c.fillRect(0, 0, W, H);
+
+        // Subtle cyber grid
+        c.strokeStyle = 'rgba(0, 240, 255, 0.04)';
+        c.lineWidth = 1;
+        for (let gx = 0; gx < W; gx += 40) {
+          c.beginPath(); c.moveTo(gx, 0); c.lineTo(gx, H); c.stroke();
+        }
+        for (let gy = 0; gy < H; gy += 40) {
+          c.beginPath(); c.moveTo(0, gy); c.lineTo(W, gy); c.stroke();
+        }
+
+        // Top Cinema Command Header
+        roundRect(c, 36, 22, W - 72, 74, 12);
+        c.fillStyle = 'rgba(8, 16, 34, 0.92)';
+        c.fill();
+        c.strokeStyle = 'rgba(0, 240, 255, 0.34)';
+        c.lineWidth = 1.5;
+        c.stroke();
+
+        c.save();
+        c.beginPath();
+        c.arc(70, 59, 8, 0, Math.PI * 2);
+        c.fillStyle = '#00f0ff';
+        c.shadowColor = '#00f0ff';
+        c.shadowBlur = 18;
+        c.fill();
+        c.restore();
+
+        c.fillStyle = '#00f0ff';
+        c.font = 'bold 24px ui-monospace, Menlo, monospace';
+        c.textAlign = 'left';
+        c.fillText('CYBER HQ // ALL-IN-ONE FLEET COMMAND WALL', 94, 54);
+        c.fillStyle = '#7b95b8';
+        c.font = '13px ui-monospace, Menlo, monospace';
+        const ctrlLbl = botHostCount > 1 ? ('MULTI-HOST · ' + botHostCount + ' CTRL') : ('@' + (data.controlHostLabel || 'CONTROL'));
+        c.fillText('LIVE MULTI-HOST TOPOLOGY · BOT BRAINS (' + ctrlLbl + ') → ORCA MESH → COMPUTE MACHINES & WORKERS', 94, 78);
+
+        // Right KPI chips + REC timecode
+        const recBlink = Math.floor(tSec * 2) % 2 === 0;
+        const kpis = [
+          { l: 'BOTS', v: data.summary.workingBots + '/' + data.summary.totalBots, col: '#00f0ff' },
+          { l: 'NODES', v: data.summary.onlineHosts + '/' + data.hosts.length, col: '#00ff9d' },
+          { l: 'ACTIVE', v: String(data.summary.activeWorkers), col: '#ff2a85' }
+        ];
+        let kx = 1320;
+        for (const kp of kpis) {
+          roundRect(c, kx, 37, 126, 44, 8);
+          c.fillStyle = 'rgba(11, 22, 46, 0.95)';
+          c.fill();
+          c.strokeStyle = 'rgba(0, 240, 255, 0.25)';
+          c.stroke();
+          c.fillStyle = '#7b95b8';
+          c.font = '11px ui-monospace, Menlo, monospace';
+          c.fillText(kp.l, kx + 12, 55);
+          c.fillStyle = kp.col;
+          c.font = 'bold 18px ui-monospace, Menlo, monospace';
+          c.fillText(kp.v, kx + 12, 74);
+          kx += 138;
+        }
+        // REC timecode badge
+        roundRect(c, 1742, 37, 124, 44, 8);
+        c.fillStyle = 'rgba(255, 42, 133, 0.16)';
+        c.fill();
+        c.strokeStyle = '#ff2a85';
+        c.stroke();
+        c.beginPath();
+        c.arc(1760, 59, 5, 0, Math.PI * 2);
+        c.fillStyle = recBlink ? '#ff2a85' : 'rgba(255, 42, 133, 0.3)';
+        c.fill();
+        c.fillStyle = '#fff';
+        c.font = 'bold 14px ui-monospace, Menlo, monospace';
+        c.fillText('00:0' + Math.min(8, Math.floor(tSec)) + '.' + Math.floor((tSec % 1) * 10), 1774, 64);
+
+        // Center Arena: Motes + Triple Counter-Rotating Holographic Radar + Oscilloscope
+        const rcx = 810, rcy = 510, rMax = 215;
+        for (const m of cinMotes) {
+          m.y += m.vy;
+          if (m.y < 120) m.y = 980;
           c.save();
           c.beginPath();
-          c.arc(tp.x, tp.y, (p.hot ? 4.5 : 2.8) * (1 - k * 0.18), 0, Math.PI * 2);
-          c.fillStyle = p.color;
-          c.globalAlpha = (p.hot ? 0.6 : 0.35) * (1 - k * 0.2);
+          c.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+          c.fillStyle = m.col;
+          c.globalAlpha = 0.35 + 0.2 * Math.sin(tSec * 3 + m.x);
           c.fill();
           c.restore();
         }
-        const hd = ptAt(p.t);
+
         c.save();
+        for (let i = 1; i <= 4; i++) {
+          const rr = (rMax / 4) * i;
+          c.beginPath();
+          c.arc(rcx, rcy, rr, 0, Math.PI * 2);
+          c.strokeStyle = i === 4 ? 'rgba(0, 240, 255, 0.24)' : 'rgba(0, 240, 255, 0.11)';
+          c.lineWidth = 1.4;
+          if (i === 2 || i === 3) c.setLineDash([7, 8]);
+          else c.setLineDash([]);
+          c.stroke();
+        }
+        c.setLineDash([]);
+        c.save();
+        c.translate(rcx, rcy);
+        c.rotate(-tSec * 0.45);
+        for (let k = 0; k < 24; k++) {
+          const a = (k / 24) * Math.PI * 2;
+          c.beginPath();
+          c.moveTo(Math.cos(a) * (rMax - 8), Math.sin(a) * (rMax - 8));
+          c.lineTo(Math.cos(a) * (rMax + 6), Math.sin(a) * (rMax + 6));
+          c.strokeStyle = k % 2 === 0 ? 'rgba(0, 240, 255, 0.4)' : 'rgba(0, 240, 255, 0.18)';
+          c.lineWidth = k % 2 === 0 ? 2 : 1;
+          c.stroke();
+        }
+        c.restore();
+
+        const swA = (tSec * 1.45) % (Math.PI * 2);
+        const rg = c.createRadialGradient(rcx, rcy, 4, rcx, rcy, rMax);
+        rg.addColorStop(0, 'rgba(0, 240, 255, 0.30)');
+        rg.addColorStop(0.65, 'rgba(0, 240, 255, 0.10)');
+        rg.addColorStop(1, 'rgba(0, 240, 255, 0)');
         c.beginPath();
-        c.arc(hd.x, hd.y, p.hot ? 5.5 : 3.2, 0, Math.PI * 2);
-        c.fillStyle = p.hot ? '#ffffff' : p.color;
-        c.shadowColor = p.color;
-        c.shadowBlur = p.hot ? 20 : 10;
+        c.moveTo(rcx, rcy);
+        c.arc(rcx, rcy, rMax, swA - 0.72, swA);
+        c.closePath();
+        c.fillStyle = rg;
+        c.fill();
+
+        c.beginPath();
+        c.arc(rcx, rcy, 7, 0, Math.PI * 2);
+        c.fillStyle = '#00f0ff';
+        c.shadowColor = '#00f0ff';
+        c.shadowBlur = 18;
         c.fill();
         c.restore();
-      }
-      for (let i = cinRipples.length - 1; i >= 0; i--) {
-        const rp = cinRipples[i];
-        rp.r += 1.1; rp.alpha -= 0.04;
-        if (rp.alpha <= 0 || rp.r >= rp.maxR) { cinRipples.splice(i, 1); continue; }
+
+        // Tailscale Mesh Label & Live Oscilloscope
+        roundRect(c, rcx - 98, 128, 196, 28, 14);
+        c.fillStyle = 'rgba(5, 13, 30, 0.85)';
+        c.fill();
+        c.strokeStyle = 'rgba(0, 240, 255, 0.38)';
+        c.stroke();
+        c.fillStyle = '#00f0ff';
+        c.font = 'bold 12px ui-monospace, Menlo, monospace';
+        c.textAlign = 'center';
+        c.fillText('TAILSCALE WARP MESH', rcx, 146);
+
+        // Oscilloscope wave
+        const ow = 360, ox = rcx - ow / 2, oy = 930;
+        const amp = 12 + Math.min(18, (data.summary.activeWorkers || 0) * 6);
         c.save();
         c.beginPath();
-        c.arc(rp.x, rp.y, rp.r, 0, Math.PI * 2);
-        c.strokeStyle = rp.color;
-        c.globalAlpha = rp.alpha;
+        for (let i = 0; i <= 72; i++) {
+          const px = ox + (i / 72) * ow;
+          const env = Math.sin((i / 72) * Math.PI);
+          const py = oy + Math.sin(i * 0.45 - tSec * 7) * amp * env + Math.cos(i * 1.1 + tSec * 11) * amp * 0.35 * env;
+          if (i === 0) c.moveTo(px, py);
+          else c.lineTo(px, py);
+        }
+        c.strokeStyle = (data.summary.activeWorkers || 0) > 0 ? '#ff2a85' : '#00f0ff';
+        c.lineWidth = 2.2;
+        c.shadowColor = c.strokeStyle;
+        c.shadowBlur = 12;
+        c.stroke();
+        c.restore();
+
+        // Draw Conduits
+        const orderMap = { standby: 0, 'worker-recent': 1, 'bot-live': 2, 'worker-live': 3 };
+        const sortedC = [...cinemaConduits].sort((a, b) => (orderMap[a.kind] || 0) - (orderMap[b.kind] || 0));
+        for (const cd of sortedC) {
+          const isLive = cd.kind === 'worker-live' || cd.kind === 'bot-live';
+          const dx = Math.max(120, Math.abs(cd.dst.x - cd.src.x) * 0.48);
+          c.save();
+          c.beginPath();
+          c.moveTo(cd.src.x, cd.src.y);
+          c.bezierCurveTo(cd.src.x + dx, cd.src.y, cd.dst.x - dx, cd.dst.y, cd.dst.x, cd.dst.y);
+          c.strokeStyle = cd.color;
+          c.globalAlpha = cd.kind === 'standby' ? 0.16 : cd.kind === 'worker-recent' ? 0.46 : 0.92;
+          c.lineWidth = isLive ? 3.2 : cd.kind === 'worker-recent' ? 2.0 : 1.2;
+          if (isLive) { c.shadowColor = cd.color; c.shadowBlur = 16; }
+          if (cd.kind === 'standby') c.setLineDash([5, 7]);
+          c.stroke();
+          c.restore();
+        }
+
+        // Cinema Packets + Comet Trails + Ripples
+        const liveC = sortedC.filter((x) => x.kind === 'worker-live' || x.kind === 'bot-live');
+        const recC = sortedC.filter((x) => x.kind === 'worker-recent');
+        if (liveC.length && frameIdx % 4 === 0) {
+          const pick = liveC[(frameIdx / 4) % liveC.length | 0];
+          cinPackets.push({ src: pick.src, dst: pick.dst, t: 0, speed: 0.024, color: pick.color, hot: true });
+        }
+        if (recC.length && frameIdx % 14 === 0) {
+          const pick = recC[(frameIdx / 14) % recC.length | 0];
+          cinPackets.push({ src: pick.src, dst: pick.dst, t: 0, speed: 0.016, color: pick.color, hot: false });
+        }
+        for (let i = cinPackets.length - 1; i >= 0; i--) {
+          const p = cinPackets[i];
+          p.t += p.speed;
+          if (p.t >= 1) {
+            if (p.hot) cinRipples.push({ x: p.dst.x, y: p.dst.y, r: 4, maxR: 28, alpha: 0.9, color: p.color });
+            cinPackets.splice(i, 1);
+            continue;
+          }
+          const ptAt = (tt) => {
+            const dx = Math.max(120, Math.abs(p.dst.x - p.src.x) * 0.48);
+            const c1x = p.src.x + dx, c1y = p.src.y, c2x = p.dst.x - dx, c2y = p.dst.y;
+            const it = 1 - tt;
+            return {
+              x: it*it*it*p.src.x + 3*it*it*tt*c1x + 3*it*tt*tt*c2x + tt*tt*tt*p.dst.x,
+              y: it*it*it*p.src.y + 3*it*it*tt*c1y + 3*it*tt*tt*c2y + tt*tt*tt*p.dst.y
+            };
+          };
+          for (let k = 4; k >= 1; k--) {
+            const tp = ptAt(Math.max(0, p.t - k * 0.022));
+            c.save();
+            c.beginPath();
+            c.arc(tp.x, tp.y, (p.hot ? 4.5 : 2.8) * (1 - k * 0.18), 0, Math.PI * 2);
+            c.fillStyle = p.color;
+            c.globalAlpha = (p.hot ? 0.6 : 0.35) * (1 - k * 0.2);
+            c.fill();
+            c.restore();
+          }
+          const hd = ptAt(p.t);
+          c.save();
+          c.beginPath();
+          c.arc(hd.x, hd.y, p.hot ? 5.5 : 3.2, 0, Math.PI * 2);
+          c.fillStyle = p.hot ? '#ffffff' : p.color;
+          c.shadowColor = p.color;
+          c.shadowBlur = p.hot ? 20 : 10;
+          c.fill();
+          c.restore();
+        }
+        for (let i = cinRipples.length - 1; i >= 0; i--) {
+          const rp = cinRipples[i];
+          rp.r += 1.1; rp.alpha -= 0.04;
+          if (rp.alpha <= 0 || rp.r >= rp.maxR) { cinRipples.splice(i, 1); continue; }
+          c.save();
+          c.beginPath();
+          c.arc(rp.x, rp.y, rp.r, 0, Math.PI * 2);
+          c.strokeStyle = rp.color;
+          c.globalAlpha = rp.alpha;
+          c.lineWidth = 2.2;
+          c.stroke();
+          c.restore();
+        }
+
+        // Left Bay Frame: BOT BRAINS
+        roundRect(c, 36, 114, 470, 876, 12);
+        c.fillStyle = 'rgba(6, 12, 26, 0.88)';
+        c.fill();
+        c.strokeStyle = 'rgba(0, 240, 255, 0.30)';
+        c.lineWidth = 1.5;
+        c.stroke();
+
+        roundRect(c, 50, 124, 442, 26, 6);
+        c.fillStyle = 'rgba(0, 240, 255, 0.11)';
+        c.fill();
+        c.fillStyle = '#00f0ff';
+        c.font = 'bold 12px ui-monospace, Menlo, monospace';
+        c.textAlign = 'left';
+        c.fillText('BOT BRAINS · ' + ctrlLbl + ' (' + orderedBots.length + ' BOTS)', 62, 141);
+
+        // Vertical Command Spine + moving spark
+        c.save();
+        c.beginPath(); c.moveTo(46, 162); c.lineTo(46, 976);
+        c.strokeStyle = 'rgba(0, 240, 255, 0.45)';
         c.lineWidth = 2.2;
         c.stroke();
+        const sy = 162 + ((tSec * 0.25) % 1) * 814;
+        c.beginPath(); c.arc(46, sy, 4, 0, Math.PI * 2);
+        c.fillStyle = '#00f0ff'; c.shadowColor = '#00f0ff'; c.shadowBlur = 12; c.fill();
         c.restore();
-      }
 
-      // Left Bay Frame: BOT BRAINS @CONTROL PLANE
-      roundRect(c, 36, 122, 470, 868, 12);
-      c.fillStyle = 'rgba(6, 12, 26, 0.88)';
-      c.fill();
-      c.strokeStyle = 'rgba(0, 240, 255, 0.30)';
-      c.lineWidth = 1.5;
-      c.stroke();
-
-      roundRect(c, 50, 134, 442, 28, 6);
-      c.fillStyle = 'rgba(0, 240, 255, 0.11)';
-      c.fill();
-      c.fillStyle = '#00f0ff';
-      c.font = 'bold 12px ui-monospace, Menlo, monospace';
-      c.textAlign = 'left';
-      c.fillText('BOT BRAINS · HOSTED ON @' + (data.controlHostLabel || 'LOCAL') + ' (' + orderedBots.length + ' BOTS)', 62, 152);
-
-      // Vertical Command Spine + moving spark
-      c.save();
-      c.beginPath(); c.moveTo(46, 178); c.lineTo(46, 974);
-      c.strokeStyle = 'rgba(0, 240, 255, 0.45)';
-      c.lineWidth = 2.2;
-      c.stroke();
-      const sy = 178 + ((tSec * 0.25) % 1) * 796;
-      c.beginPath(); c.arc(46, sy, 4, 0, Math.PI * 2);
-      c.fillStyle = '#00f0ff'; c.shadowColor = '#00f0ff'; c.shadowBlur = 12; c.fill();
-      c.restore();
-
-      for (const box of botBoxes.values()) {
-        const b = box.bot;
-        const isW = b.state === 'working';
-        const isU = b.state === 'unread';
-        roundRect(c, box.x, box.y, box.w, box.h, 7);
-        c.fillStyle = isW ? 'rgba(255, 42, 133, 0.14)' : 'rgba(10, 19, 39, 0.94)';
-        c.fill();
-        c.strokeStyle = isW ? '#ff2a85' : isU ? '#ffb800' : b.squad === 'command' ? '#00f0ff' : 'rgba(120, 144, 178, 0.28)';
-        c.lineWidth = isW ? 2 : 1.1;
-        c.stroke();
-
-        // Laser sweep shimmer on WORKING bot
-        if (isW) {
-          c.save();
+        for (const box of botBoxes.values()) {
+          const b = box.bot;
+          const isW = b.state === 'working';
+          const isU = b.state === 'unread';
+          const compactRow = box.h < 42;
           roundRect(c, box.x, box.y, box.w, box.h, 7);
-          c.clip();
-          const lx = box.x - 120 + ((tSec * 240) % (box.w + 240));
-          const lg = c.createLinearGradient(lx, 0, lx + 120, 0);
-          lg.addColorStop(0, 'rgba(255,42,133,0)');
-          lg.addColorStop(0.5, 'rgba(255,42,133,0.28)');
-          lg.addColorStop(1, 'rgba(0,240,255,0)');
-          c.fillStyle = lg;
-          c.fillRect(lx, box.y, 120, box.h);
-          c.restore();
-        }
-
-        // LED
-        c.beginPath();
-        c.arc(box.x + 15, box.y + 18, 4.5, 0, Math.PI * 2);
-        c.fillStyle = isW ? '#ff2a85' : isU ? '#ffb800' : '#00f0ff';
-        c.fill();
-
-        // Name + Agent Model badge + Route badge
-        c.fillStyle = '#eef7ff';
-        c.font = 'bold 14px -apple-system, sans-serif';
-        c.textAlign = 'left';
-        c.fillText(b.shortName || b.name, box.x + 28, box.y + 23);
-
-        const ag = formatAgentBadge(b.agent);
-        const rt = routeBadgeForBot(b);
-        c.fillStyle = isW ? '#ff2a85' : rt.cls === 'gpu' ? '#ffb800' : rt.cls === 'qa' ? '#a77bff' : '#7b95b8';
-        c.font = 'bold 11px ui-monospace, Menlo, monospace';
-        c.textAlign = 'right';
-        c.fillText(rt.text, box.x + box.w - 14, box.y + 22);
-
-        c.fillStyle = ag.color;
-        c.fillText('[' + ag.label + ']', box.x + box.w - 72, box.y + 22);
-
-        // Live task summary
-        if (b.activeSessionTitle || isW) {
-          const tStr = (b.activeToolName ? '[' + b.activeToolName + '] ' : '') + (b.activeSessionTitle || 'Active session');
-          c.fillStyle = isW ? '#ff9ccc' : '#8cbce0';
-          c.font = '11.5px ui-monospace, Menlo, monospace';
-          c.textAlign = 'left';
-          c.fillText(truncText(tStr, 46), box.x + 14, box.y + box.h - 11);
-        }
-
-        // Output port
-        c.beginPath();
-        c.arc(box.portOut.x, box.portOut.y, 4.5, 0, Math.PI * 2);
-        c.fillStyle = isW ? '#ff2a85' : '#071326';
-        c.fill();
-        c.strokeStyle = isW ? '#fff' : '#00f0ff';
-        c.lineWidth = 1.6;
-        c.stroke();
-      }
-
-      // Right Bay: 3 Compute Machine Pods + Live Arc Gauges + Nested Hosted Workers
-      for (const hb of hostBoxes.values()) {
-        const h = hb.host;
-        const isAct = h.activeWorkers > 0;
-        roundRect(c, hb.x, hb.y, hb.w, hb.h, 12);
-        c.fillStyle = 'rgba(6, 13, 28, 0.92)';
-        c.fill();
-        c.strokeStyle = isAct ? 'rgba(255, 42, 133, 0.78)' : 'rgba(0, 240, 255, 0.30)';
-        c.lineWidth = isAct ? 2 : 1.4;
-        c.stroke();
-
-        // Host Header + Ownership
-        c.fillStyle = '#f2f9ff';
-        c.font = 'bold 16px ui-monospace, Menlo, monospace';
-        c.textAlign = 'left';
-        c.fillText(h.label + '  (' + h.specs + ')', hb.x + 18, hb.y + 27);
-
-        c.fillStyle = h.online ? '#00ff9d' : '#ff2a85';
-        c.font = 'bold 12px ui-monospace, Menlo, monospace';
-        c.textAlign = 'right';
-        c.fillText(h.online ? ('ONLINE · ' + h.activeWorkers + 'W') : 'OFFLINE', hb.x + hb.w - 18, hb.y + 26);
-
-        const owner = hostOwnerInfo(h, data.bots || []);
-        c.fillStyle = owner.cls === 'gpu' ? '#ffd46b' : owner.cls === 'qa' ? '#cbb2ff' : '#00f0ff';
-        c.font = '11px ui-monospace, Menlo, monospace';
-        c.textAlign = 'left';
-        c.fillText(owner.text + '  ·  ' + h.endpoint.replace(/^ws:\/\//, ''), hb.x + 18, hb.y + 47);
-
-        // Gauges
-        const m = h.metrics;
-        if (m) {
-          const wobble = Math.sin(tSec * 2.4 + hb.y) * 1.2;
-          if (m.gpu) {
-            const vramPct = m.gpu.vramTotalMiB > 0 ? Math.round((m.gpu.vramUsedMiB / m.gpu.vramTotalMiB) * 100) : 0;
-            const gList = [
-              { l: 'CPU', p: Math.max(0, m.cpuPct + wobble), s: 'ld ' + m.load1, a: '#00f0ff' },
-              { l: 'RAM', p: m.ramPct, s: m.ramUsedGb + '/' + m.ramTotalGb + 'G', a: '#00ff9d' },
-              { l: 'DISK', p: m.diskPct, s: m.diskFreeGb + 'G free', a: '#a77bff' },
-              { l: m.gpu.name || 'GPU', p: m.gpu.utilPct, s: m.gpu.tempC + '°C · ' + m.gpu.powerW + 'W', a: '#ffb800' },
-              { l: 'VRAM', p: vramPct, s: m.gpu.vramUsedMiB + 'M/12G', a: '#ff2a85' }
-            ];
-            gList.forEach((g, gi) => {
-              drawCinemaGauge(c, hb.x + 82 + gi * 142, hb.y + 104, 34, g.l, g.p, g.s, g.a, introEase);
-            });
-          } else {
-            const gList = [
-              { l: 'CPU', p: Math.max(0, m.cpuPct + wobble), s: 'load ' + m.load1, a: '#00f0ff' },
-              { l: 'RAM', p: m.ramPct, s: m.ramUsedGb + '/' + m.ramTotalGb + 'G', a: '#00ff9d' },
-              { l: 'DISK', p: m.diskPct, s: m.diskFreeGb + 'G free', a: '#a77bff' }
-            ];
-            gList.forEach((g, gi) => {
-              drawCinemaGauge(c, hb.x + 135 + gi * 232, hb.y + 98, 33, g.l, g.p, g.s, g.a, introEase);
-            });
-          }
-        }
-
-        // Nested Hosted Workers
-        for (const wk of hb.workers) {
-          const wb = workerBoxes.get(wk.id);
-          if (!wb) continue;
-          const isW = wk.state === 'working';
-          roundRect(c, wb.x, wb.y, wb.w, wb.h, 6);
-          c.fillStyle = isW ? 'rgba(255, 42, 133, 0.16)' : 'rgba(10, 20, 42, 0.94)';
+          c.fillStyle = isW ? 'rgba(255, 42, 133, 0.14)' : 'rgba(10, 19, 39, 0.94)';
           c.fill();
-          c.strokeStyle = isW ? '#ff2a85' : wk.state === 'succeeded' ? 'rgba(0, 255, 157, 0.45)' : 'rgba(0, 240, 255, 0.25)';
-          c.lineWidth = isW ? 1.8 : 1.1;
+          c.strokeStyle = isW ? '#ff2a85' : isU ? '#ffb800' : b.squad === 'command' ? '#00f0ff' : 'rgba(120, 144, 178, 0.28)';
+          c.lineWidth = isW ? 2 : 1.1;
+          c.stroke();
+
+          if (isW) {
+            c.save();
+            roundRect(c, box.x, box.y, box.w, box.h, 7);
+            c.clip();
+            const lx = box.x - 120 + ((tSec * 240) % (box.w + 240));
+            const lg = c.createLinearGradient(lx, 0, lx + 120, 0);
+            lg.addColorStop(0, 'rgba(255,42,133,0)');
+            lg.addColorStop(0.5, 'rgba(255,42,133,0.28)');
+            lg.addColorStop(1, 'rgba(0,240,255,0)');
+            c.fillStyle = lg;
+            c.fillRect(lx, box.y, 120, box.h);
+            c.restore();
+          }
+
+          const topY = compactRow ? (box.y + box.h / 2) : (box.y + 17);
+          c.beginPath();
+          c.arc(box.x + 15, topY, 4.2, 0, Math.PI * 2);
+          c.fillStyle = isW ? '#ff2a85' : isU ? '#ffb800' : '#00f0ff';
+          c.fill();
+
+          c.fillStyle = '#eef7ff';
+          c.font = compactRow ? 'bold 12.5px -apple-system, sans-serif' : 'bold 13.5px -apple-system, sans-serif';
+          c.textAlign = 'left';
+          c.fillText(truncText(b.shortName || b.name, 20), box.x + 27, topY + 4);
+
+          const ag = formatAgentBadge(b.agent);
+          const rt = routeBadgeForBot(b);
+          c.fillStyle = isW ? '#ff2a85' : rt.cls === 'gpu' ? '#ffb800' : rt.cls === 'qa' ? '#a77bff' : '#7b95b8';
+          c.font = 'bold 10.5px ui-monospace, Menlo, monospace';
+          c.textAlign = 'right';
+          c.fillText(rt.text, box.x + box.w - 12, topY + 3.5);
+
+          c.fillStyle = ag.color;
+          c.fillText('[' + ag.label + ']', box.x + box.w - 76, topY + 3.5);
+
+          if (!compactRow && (b.activeSessionTitle || isW)) {
+            const tStr = (b.activeToolName ? '[' + b.activeToolName + '] ' : '') + (b.activeSessionTitle || 'Active session');
+            c.fillStyle = isW ? '#ff9ccc' : '#8cbce0';
+            c.font = '11px ui-monospace, Menlo, monospace';
+            c.textAlign = 'left';
+            c.fillText(truncText(tStr, 46), box.x + 14, box.y + box.h - 9);
+          }
+
+          c.beginPath();
+          c.arc(box.portOut.x, box.portOut.y, 4.5, 0, Math.PI * 2);
+          c.fillStyle = isW ? '#ff2a85' : '#071326';
+          c.fill();
+          c.strokeStyle = isW ? '#fff' : '#00f0ff';
+          c.lineWidth = 1.6;
+          c.stroke();
+        }
+
+        // Right Bay: Dynamic Compute Machine Pods + Live Arc Gauges + Nested Hosted Workers
+        for (const hb of hostBoxes.values()) {
+          const h = hb.host;
+          const isAct = h.activeWorkers > 0;
+          roundRect(c, hb.x, hb.y, hb.w, hb.h, 12);
+          c.fillStyle = 'rgba(6, 13, 28, 0.92)';
+          c.fill();
+          c.strokeStyle = isAct ? 'rgba(255, 42, 133, 0.78)' : 'rgba(0, 240, 255, 0.30)';
+          c.lineWidth = isAct ? 2 : 1.4;
           c.stroke();
 
           c.fillStyle = '#f2f9ff';
-          c.font = 'bold 12.5px ui-monospace, Menlo, monospace';
+          c.font = 'bold 15px ui-monospace, Menlo, monospace';
           c.textAlign = 'left';
-          c.fillText(truncText(wk.title, 34), wb.x + 12, wb.y + 15);
+          c.fillText(truncText(h.label + '  (' + h.specs + ')', 46), hb.x + 16, hb.y + 24);
 
-          const wAg = formatAgentBadge(wk.agent);
-          const metaTxt = '[' + wAg.label + '] ' + (wk.bot ? ('via ' + wk.bot) : ('@ ' + wk.host)) + ' · ' + (wk.sessionTitle || wk.workspacePath || '');
-          c.fillStyle = isW ? '#ff9ccc' : '#8cbce0';
-          c.font = '11px ui-monospace, Menlo, monospace';
-          c.fillText(truncText(metaTxt, 68), wb.x + 12, wb.y + 31);
-
-          c.fillStyle = isW ? '#ff2a85' : wk.state === 'succeeded' ? '#00ff9d' : '#00f0ff';
-          c.font = 'bold 11px ui-monospace, Menlo, monospace';
+          c.fillStyle = h.online ? '#00ff9d' : '#ff2a85';
+          c.font = 'bold 11.5px ui-monospace, Menlo, monospace';
           c.textAlign = 'right';
-          c.fillText(wk.state.toUpperCase(), wb.x + wb.w - 12, wb.y + 16);
+          c.fillText(h.online ? ('ONLINE · ' + h.activeWorkers + 'W') : 'OFFLINE', hb.x + hb.w - 16, hb.y + 24);
 
-          c.beginPath();
-          c.arc(wb.portIn.x, wb.portIn.y, 4.5, 0, Math.PI * 2);
-          c.fillStyle = isW ? '#ff2a85' : '#071326';
-          c.fill();
-          c.strokeStyle = isW ? '#fff' : '#00ff9d';
-          c.stroke();
+          const owner = hostOwnerInfo(h, data.bots || []);
+          c.fillStyle = owner.cls === 'gpu' ? '#ffd46b' : owner.cls === 'qa' ? '#cbb2ff' : '#00f0ff';
+          c.font = '10.5px ui-monospace, Menlo, monospace';
+          c.textAlign = 'left';
+          c.fillText(truncText(owner.text + '  ·  ' + h.endpoint.replace(/^ws:\/\//, ''), 76), hb.x + 16, hb.y + 42);
+
+          const m = h.metrics;
+          if (m) {
+            const wobble = Math.sin(tSec * 2.4 + hb.y) * 1.2;
+            const gr = hb.gaugeR || 28;
+            const gcy = hb.y + (hb.gaugeCy || 92);
+            if (m.gpu) {
+              const vramPct = m.gpu.vramTotalMiB > 0 ? Math.round((m.gpu.vramUsedMiB / m.gpu.vramTotalMiB) * 100) : 0;
+              const vramGb = Math.max(1, Math.round((m.gpu.vramTotalMiB || 0) / 1024));
+              const gList = [
+                { l: 'CPU', p: Math.max(0, m.cpuPct + wobble), s: 'ld ' + m.load1, a: '#00f0ff' },
+                { l: 'RAM', p: m.ramPct, s: m.ramUsedGb + '/' + m.ramTotalGb + 'G', a: '#00ff9d' },
+                { l: 'DISK', p: m.diskPct, s: m.diskFreeGb + 'G free', a: '#a77bff' },
+                { l: m.gpu.name || 'GPU', p: m.gpu.utilPct, s: m.gpu.tempC + '°C · ' + m.gpu.powerW + 'W', a: '#ffb800' },
+                { l: 'VRAM', p: vramPct, s: m.gpu.vramUsedMiB + 'M/' + vramGb + 'G', a: '#ff2a85' }
+              ];
+              gList.forEach((g, gi) => {
+                drawCinemaGauge(c, hb.x + 82 + gi * 146, gcy, gr, g.l, g.p, g.s, g.a, introEase);
+              });
+            } else {
+              const gList = [
+                { l: 'CPU', p: Math.max(0, m.cpuPct + wobble), s: 'load ' + m.load1, a: '#00f0ff' },
+                { l: 'RAM', p: m.ramPct, s: m.ramUsedGb + '/' + m.ramTotalGb + 'G', a: '#00ff9d' },
+                { l: 'DISK', p: m.diskPct, s: m.diskFreeGb + 'G free', a: '#a77bff' }
+              ];
+              gList.forEach((g, gi) => {
+                drawCinemaGauge(c, hb.x + 135 + gi * 238, gcy, gr, g.l, g.p, g.s, g.a, introEase);
+              });
+            }
+          }
+
+          for (const wk of hb.workers) {
+            const wb = workerBoxes.get(wk.id);
+            if (!wb) continue;
+            const isW = wk.state === 'working';
+            const compactWk = wb.h < 33;
+            roundRect(c, wb.x, wb.y, wb.w, wb.h, 6);
+            c.fillStyle = isW ? 'rgba(255, 42, 133, 0.16)' : 'rgba(10, 20, 42, 0.94)';
+            c.fill();
+            c.strokeStyle = isW ? '#ff2a85' : wk.state === 'succeeded' ? 'rgba(0, 255, 157, 0.45)' : 'rgba(0, 240, 255, 0.25)';
+            c.lineWidth = isW ? 1.8 : 1.1;
+            c.stroke();
+
+            const wAg = formatAgentBadge(wk.agent);
+            c.fillStyle = '#f2f9ff';
+            c.font = compactWk ? 'bold 11.5px ui-monospace, Menlo, monospace' : 'bold 12.5px ui-monospace, Menlo, monospace';
+            c.textAlign = 'left';
+            c.fillText(truncText(wk.title, compactWk ? 26 : 34), wb.x + 12, compactWk ? (wb.y + 18) : (wb.y + 15));
+
+            if (!compactWk) {
+              const metaTxt = '[' + wAg.label + '] ' + (wk.bot ? ('via ' + wk.bot) : ('@ ' + wk.host)) + ' · ' + (wk.sessionTitle || wk.workspacePath || '');
+              c.fillStyle = isW ? '#ff9ccc' : '#8cbce0';
+              c.font = '10.5px ui-monospace, Menlo, monospace';
+              c.fillText(truncText(metaTxt, 68), wb.x + 12, wb.y + 30);
+            } else {
+              const metaTxt = '[' + wAg.label + '] ' + (wk.bot ? ('via ' + wk.bot) : ('@ ' + wk.host));
+              c.fillStyle = '#8cbce0';
+              c.font = '10.5px ui-monospace, Menlo, monospace';
+              c.fillText(truncText(metaTxt, 34), wb.x + 230, wb.y + 18);
+            }
+
+            c.fillStyle = isW ? '#ff2a85' : wk.state === 'succeeded' ? '#00ff9d' : '#00f0ff';
+            c.font = 'bold 10.5px ui-monospace, Menlo, monospace';
+            c.textAlign = 'right';
+            c.fillText(wk.state.toUpperCase(), wb.x + wb.w - 12, compactWk ? (wb.y + 18) : (wb.y + 15));
+
+            c.beginPath();
+            c.arc(wb.portIn.x, wb.portIn.y, 4.5, 0, Math.PI * 2);
+            c.fillStyle = isW ? '#ff2a85' : '#071326';
+            c.fill();
+            c.strokeStyle = isW ? '#fff' : '#00ff9d';
+            c.stroke();
+          }
+        }
+
+        // Bottom Cinema Telemetry Bar
+        roundRect(c, 36, 1004, W - 72, 48, 8);
+        c.fillStyle = 'rgba(7, 15, 32, 0.94)';
+        c.fill();
+        c.strokeStyle = 'rgba(0, 240, 255, 0.26)';
+        c.stroke();
+        const latestEv = (data.events && data.events[0]) ? data.events[0].message : 'CYBER HQ RADAR · ALL SYSTEMS NOMINAL';
+        c.fillStyle = '#00f0ff';
+        c.font = 'bold 12.5px ui-monospace, Menlo, monospace';
+        c.textAlign = 'left';
+        c.fillText('// LIVE TELEMETRY:', 54, 1033);
+        c.fillStyle = '#c8e3ff';
+        c.fillText(truncText(latestEv, 110), 212, 1033);
+
+        // Subtle CRT scanline sheen
+        c.fillStyle = 'rgba(0, 240, 255, 0.015)';
+        for (let sy2 = 0; sy2 < H; sy2 += 4) c.fillRect(0, sy2, W, 1);
+
+        frameIdx++;
+      }
+
+      async function recordOnce(mimeType) {
+        const stream = off.captureStream(FPS);
+        const chunks = [];
+        let tickTimer = null;
+        let safetyTimer = null;
+        try {
+          const opts = { videoBitsPerSecond: 4500000 };
+          if (mimeType) opts.mimeType = mimeType;
+          const recorder = new MediaRecorder(stream, opts);
+          recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+
+          const blob = await new Promise((resolve, reject) => {
+            let settled = false;
+            const finish = (err, outBlob) => {
+              if (settled) return;
+              settled = true;
+              if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+              if (safetyTimer) { clearTimeout(safetyTimer); safetyTimer = null; }
+              if (err) reject(err);
+              else resolve(outBlob);
+            };
+            recorder.onerror = (ev) => {
+              finish(new Error(ev?.error?.message || 'MediaRecorder error'));
+            };
+            recorder.onstop = () => {
+              const finalMime = recorder.mimeType || mimeType || 'video/webm';
+              finish(null, new Blob(chunks, { type: finalMime }));
+            };
+
+            frameIdx = 0;
+            renderCinemaAt(0);
+            recorder.start(250);
+            const startMs = performance.now();
+            tickTimer = setInterval(() => {
+              const elapsed = performance.now() - startMs;
+              renderCinemaAt(Math.min(DURATION_MS, elapsed));
+              if (elapsed >= DURATION_MS) {
+                clearInterval(tickTimer);
+                tickTimer = null;
+                try {
+                  if (recorder.state !== 'inactive') recorder.stop();
+                } catch (stopErr) {
+                  finish(stopErr);
+                }
+              }
+            }, Math.round(1000 / FPS));
+
+            safetyTimer = setTimeout(() => {
+              try {
+                if (recorder.state !== 'inactive') recorder.stop();
+                else finish(new Error('Recording timed out'));
+              } catch (e) {
+                finish(e);
+              }
+            }, DURATION_MS + 5000);
+          });
+
+          if (!blob || blob.size < 1024) {
+            throw new Error('Recorded video buffer is empty');
+          }
+          return blob;
+        } finally {
+          if (tickTimer) clearInterval(tickTimer);
+          if (safetyTimer) clearTimeout(safetyTimer);
+          stream.getTracks().forEach((t) => { try { t.stop(); } catch {} });
         }
       }
 
-      // Bottom Cinema Telemetry Bar
-      roundRect(c, 36, 1004, W - 72, 48, 8);
-      c.fillStyle = 'rgba(7, 15, 32, 0.94)';
-      c.fill();
-      c.strokeStyle = 'rgba(0, 240, 255, 0.26)';
-      c.stroke();
-      const latestEv = (data.events && data.events[0]) ? data.events[0].message : 'CYBER HQ RADAR · ALL SYSTEMS NOMINAL';
-      c.fillStyle = '#00f0ff';
-      c.font = 'bold 12.5px ui-monospace, Menlo, monospace';
-      c.textAlign = 'left';
-      c.fillText('// LIVE TELEMETRY:', 54, 1033);
-      c.fillStyle = '#c8e3ff';
-      c.fillText(truncText(latestEv, 110), 212, 1033);
-
-      // Subtle CRT scanline sheen
-      c.fillStyle = 'rgba(0, 240, 255, 0.015)';
-      for (let sy2 = 0; sy2 < H; sy2 += 4) c.fillRect(0, sy2, W, 1);
-
-      frameIdx++;
-      if (elapsed < DURATION_MS) {
-        requestAnimationFrame(drawCinemaFrame);
-      } else {
-        recorder.stop();
+      let blob = null;
+      let lastRecErr = null;
+      for (const candidateMime of mimeCandidates) {
+        try {
+          blob = await recordOnce(candidateMime);
+          if (blob && blob.size >= 1024) break;
+        } catch (recErr) {
+          lastRecErr = recErr;
+        }
       }
-    }
+      if (!blob) {
+        throw lastRecErr || new Error('All MediaRecorder codecs failed');
+      }
 
-    requestAnimationFrame(drawCinemaFrame);
-
-    try {
-      const blob = await donePromise;
       recBtn.textContent = 'SAVING...';
-      const outMime = blob.type || mimeType || 'video/webm';
+      const outMime = blob.type || 'video/webm';
       const ext = outMime.includes('mp4') ? 'mp4' : 'webm';
       const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
       const fname = 'cyber-hq-radar-' + stamp + '.' + ext;
 
       const base64 = await blobToBase64(blob);
-      const saved = await apiRequest('hq.saveVideo', {
-        base64,
-        mimeType: outMime,
-        filename: fname,
-        reveal: true
-      });
+      let saved = null;
+      try {
+        saved = await saveVideoChunked(base64, outMime, fname);
+      } catch (saveErr) {
+        saved = { saved: false, error: saveErr && saveErr.message ? saveErr.message : 'save failed' };
+      }
+
       if (saved && saved.saved) {
         const mb = (saved.bytes / (1024 * 1024)).toFixed(2);
         showToast('✓ 已导出 ~/Downloads/' + fname + ' (' + mb + 'MB)');
-      } else if (orca && orca.host && orca.host.call) {
-        const buf = await blob.arrayBuffer();
-        await orca.host.call('files.saveAs', { suggestedName: fname, mimeType: outMime, data: buf });
-        showToast('✓ 已导出视频 ' + fname);
       } else {
-        showToast('! 导出失败: ' + (saved?.error || 'unknown'));
+        triggerBrowserDownload(blob, fname);
+        const mb = (blob.size / (1024 * 1024)).toFixed(2);
+        showToast('✓ 已通过浏览器下载 ' + fname + ' (' + mb + 'MB)');
       }
     } catch (err) {
       showToast('! 导出异常: ' + (err && err.message ? err.message : 'failed'));
