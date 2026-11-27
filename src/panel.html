@@ -800,8 +800,8 @@
       <span class="kpi-chip"><span class="kl">BOTS</span><span class="kv" id="kpiBots">-</span></span>
       <span class="kpi-chip ok"><span class="kl">NODES</span><span class="kv" id="kpiHosts">-</span></span>
       <span class="kpi-chip hot"><span class="kl">ACTIVE</span><span class="kv" id="kpiActive">-</span></span>
-      <button class="cyber-btn fs-btn" id="fsBtn" title="一键全屏指挥墙展示">⛶ FULLSCREEN</button>
-      <button class="cyber-btn rec-btn" id="recBtn" title="导出 1080P 赛博效果视频到 ~/Downloads">● REC 1080P</button>
+      <button class="cyber-btn fs-btn" id="fsBtn" title="Open Fullscreen Command Wallboard">⛶ FULLSCREEN</button>
+      <button class="cyber-btn rec-btn" id="recBtn" title="Export 1080p Showcase Video to ~/Downloads">● REC 1080P</button>
       <button class="cyber-btn" id="scanBtn">SCAN</button>
     </div>
   </div>
@@ -837,7 +837,7 @@
 
   <!-- LIVE HOVER INSPECTOR & JUMP FEEDBACK -->
   <div class="box inspector">
-    <div class="insp-text" id="inspectorText"><b>[TIP]</b> 悬停任意 Bot / Worker / 主机高亮完整归属链路 · 点击直接跳入对应 Orca Session</div>
+    <div class="insp-text" id="inspectorText"><b>[TIP]</b> Hover any Bot, Worker, or Host to highlight full dispatch conduits · Click to jump straight into its Orca Session</div>
     <div class="insp-toast" id="jumpToast"></div>
   </div>
 
@@ -1429,19 +1429,19 @@
 
   function updateInspectorForFocus(f) {
     if (!f) {
-      inspectorText.innerHTML = '<b>[TIP]</b> 悬停或点击主机高亮归属链路 · 点击空白处或按 ESC 取消选中 · 点击 Bot/Worker 直达 Orca Session';
+      inspectorText.innerHTML = '<b>[TIP]</b> Hover or click a host to pin its conduits · Click blank space or press ESC to clear · Click a Bot or Worker to open its Orca Session';
       return;
     }
-    const lockTag = pinned ? ' <span style="color:var(--emerald)">[已锁定·点空白取消]</span>' : '';
+    const lockTag = pinned ? ' <span style="color:var(--emerald)">[PINNED · CLICK BLANK TO CLEAR]</span>' : '';
     if (f.kind === 'worker') {
       const w = snap?.workers?.find((x) => x.id === f.id);
       const ag = formatAgentBadge(w?.agent);
       const matchedBot = w?.bot ? snap?.bots?.find((x) => x.name === w.bot) : null;
       inspectorText.innerHTML = '<b>[WORKER]</b> ' + escapeHtml(w?.title || f.id) +
-        ' · 模型 <b style="color:' + ag.color + '">' + escapeHtml(ag.label) + '</b>' +
-        ' · 运行于 <b>' + escapeHtml(hostShort(w?.host)) + '</b>' +
-        (w?.bot ? (' · 由 <b>' + escapeHtml(w.bot) + '</b> (@' + escapeHtml(hostShort(matchedBot?.botHost)) + ') 派发') : '') +
-        ' · 点击直达 Session' + lockTag;
+        ' · Engine <b style="color:' + ag.color + '">' + escapeHtml(ag.label) + '</b>' +
+        ' · Running on <b>' + escapeHtml(hostShort(w?.host)) + '</b>' +
+        (w?.bot ? (' · Dispatched by <b>' + escapeHtml(w.bot) + '</b> (@' + escapeHtml(hostShort(matchedBot?.botHost)) + ')') : '') +
+        ' · Click to open Session' + lockTag;
       return;
     }
     if (f.kind === 'bot') {
@@ -1449,15 +1449,15 @@
       const ag = formatAgentBadge(b?.agent);
       const targets = [hostShort(b?.primaryHost), b?.secondaryHost ? hostShort(b.secondaryHost) : null].filter(Boolean).join(' + ');
       inspectorText.innerHTML = '<b>[BOT]</b> ' + escapeHtml(f.botName || '') +
-        ' · 引擎 <b style="color:' + ag.color + '">' + escapeHtml(ag.label) + '</b>' +
-        ' · 大脑驻留 <b>' + escapeHtml(hostShort(b?.botHost)) + '</b> → 算力路由 <b>' + escapeHtml(targets) + '</b>' +
-        (b?.activeSessionTitle ? (' · 当前: ' + escapeHtml(b.activeSessionTitle)) : '') + lockTag;
+        ' · Engine <b style="color:' + ag.color + '">' + escapeHtml(ag.label) + '</b>' +
+        ' · Brain on <b>' + escapeHtml(hostShort(b?.botHost)) + '</b> → Routes to <b>' + escapeHtml(targets) + '</b>' +
+        (b?.activeSessionTitle ? (' · Active: ' + escapeHtml(b.activeSessionTitle)) : '') + lockTag;
       return;
     }
     if (f.kind === 'host') {
       const h = snap?.hosts?.find((x) => x.id === f.hostId);
       inspectorText.innerHTML = '<b>[HOST]</b> ' + escapeHtml(h?.label || f.hostId) +
-        ' (' + escapeHtml(h?.specs || '') + ') · ' + (h?.activeWorkers || 0) + ' 个活跃 Worker · ' + escapeHtml(h?.role || '') + lockTag;
+        ' (' + escapeHtml(h?.specs || '') + ') · ' + (h?.activeWorkers || 0) + ' active worker(s) · ' + escapeHtml(h?.role || '') + lockTag;
     }
   }
 
@@ -1587,7 +1587,7 @@
       const ws = bEl.getAttribute('data-ws') || null;
       const host = bEl.getAttribute('data-host') || 'local';
       if (!ws) {
-        showToast('! ' + bName + ' 暂无可打开会话');
+        showToast('! ' + bName + ' has no openable session');
         return;
       }
       showToast('OPENING → ' + bName + '...');
@@ -2115,7 +2115,7 @@
     if (isRecording || !snap) return;
     const mimeCandidates = pickRecorderMimes();
     if (!mimeCandidates.length) {
-      showToast('! 当前运行环境不支持 MediaRecorder 录屏');
+      showToast('! MediaRecorder is unavailable in this environment');
       return;
     }
 
@@ -2829,14 +2829,14 @@
 
       if (saved && saved.saved) {
         const mb = (saved.bytes / (1024 * 1024)).toFixed(2);
-        showToast('✓ 已导出 ~/Downloads/' + fname + ' (' + mb + 'MB)');
+        showToast('✓ Exported ~/Downloads/' + fname + ' (' + mb + 'MB)');
       } else {
         triggerBrowserDownload(blob, fname);
         const mb = (blob.size / (1024 * 1024)).toFixed(2);
-        showToast('✓ 已通过浏览器下载 ' + fname + ' (' + mb + 'MB)');
+        showToast('✓ Downloaded ' + fname + ' (' + mb + 'MB)');
       }
     } catch (err) {
-      showToast('! 导出异常: ' + (err && err.message ? err.message : 'failed'));
+      showToast('! Export failed: ' + (err && err.message ? err.message : 'unknown error'));
     } finally {
       isRecording = false;
       recBtn.disabled = false;
@@ -2869,7 +2869,7 @@
           await document.documentElement.requestFullscreen();
         }
       } catch {
-        showToast('! 按 ⌃⌘F 切换原生全屏');
+        showToast('! Press ⌃⌘F to toggle native fullscreen');
       }
       return;
     }
@@ -2879,12 +2879,12 @@
     try {
       const res = await apiRequest('hq.openFullscreenWall');
       if (res && res.opened) {
-        showToast('✓ 已打开独立全屏指挥墙 (SSE 实时同步)');
+        showToast('✓ Fullscreen Command Wall opened (live SSE sync)');
       } else {
-        showToast('! 全屏启动失败: ' + (res?.error || 'unknown'));
+        showToast('! Fullscreen launch failed: ' + (res?.error || 'unknown'));
       }
     } catch {
-      showToast('! 全屏启动异常');
+      showToast('! Failed to open fullscreen wall');
     } finally {
       fsBtn.disabled = false;
       updateFsButtonLabel();

@@ -74,9 +74,20 @@ To run Cyber HQ Radar on your laptop while keeping your Bot control plane on ano
 | Setting | Default | Description |
 | --- | --- | --- |
 | `controlEnvironment` | `""` (auto) | Paired Orca environment name hosting your Bots (auto-detected if local Orca has no Bots). |
-| `sshTargets` | `""` | Optional comma-separated `envName=user@host` overrides for SSH CPU/RAM/Disk/GPU telemetry. |
+| `sshTargets` | `""` | Optional comma-separated `envName=user@host` overrides for SSH CPU/RAM/Disk/GPU telemetry and SSH hub relay discovery. |
+| `hubRelays` | `""` | Optional Zero-SSH HTTP relay map `envName=http://100.x.y.z:19768#token` for hubs running `scripts/hub-relay.mjs`. |
 | `showLocalHost` | `true` | Set `false` on a dedicated monitoring laptop to hide the laptop itself and show only remote cluster machines. |
 | `pollIntervalSec` | `10` | Sweep interval in seconds (`5–120`). |
+
+### Zero-SSH Hub Relay Mode (Optional)
+
+If your paired hub machine (e.g. a Mac mini) does not have SSH enabled, run the bundled zero-dependency relay on that hub—no `sudo` or SSH daemon required:
+
+```bash
+node scripts/hub-relay.mjs --host <your-tailscale-ip> --port 19768
+```
+
+It binds strictly to the interface you pass, requires a timing-safe Bearer token, does zero background polling (on-demand stale-while-revalidate), and prints the ready-to-paste `hubRelays` setting value that surfaces both the hub's own hardware gauges and all of its downstream paired worker servers (including GPU/VRAM) in a single request.
 
 ---
 
