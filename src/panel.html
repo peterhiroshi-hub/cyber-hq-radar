@@ -2079,7 +2079,7 @@
   async function saveVideoChunked(base64Raw, outMime, fname) {
     const clean = String(base64Raw || '').replace(/^data:[^,]*;base64,/i, '');
     if (!clean) throw new Error('Empty encoded video payload');
-    const CHUNK_SIZE = 256 * 1024;
+    const CHUNK_SIZE = 64 * 1024;
     if (clean.length <= CHUNK_SIZE) {
       return apiRequest('hq.saveVideo', {
         base64: clean,
@@ -2135,26 +2135,58 @@
         throw new Error('Canvas captureStream unavailable');
       }
 
+      // Ensure latest live metrics across all hosts before recording
+      if ((snap.hosts || []).some((h) => !h.metrics)) {
+        recBtn.textContent = 'SYNCING...';
+        try {
+          const fresh = await Promise.race([
+            apiRequest('hq.refresh'),
+            new Promise((resolve) => setTimeout(() => resolve(null), 3500))
+          ]);
+          if (fresh && Array.isArray(fresh.hosts)) {
+            snap = fresh;
+            renderDom(snap);
+          }
+        } catch {}
+      }
+
       const data = JSON.parse(JSON.stringify(snap));
       const orderedBots = orderBotGroups(data.bots || []).flatMap((g) => g.bots);
       const sortedHosts = sortHostsForDeck(data.hosts || []);
       const botHostCount = new Set((data.bots || []).map((b) => b.botHost || data.controlHostId || 'local')).size;
 
-      // Dynamic 1920x1080 Cinema Layout Coordinates (zero overflow for 1..24 bots & 1..6 hosts)
+      // Build Engine Mix summary for the 1080p cinema top strip
+      const engineBuckets = new Map();
+      const tallyEngine = (rawAg, isBot) => {
+        const ag = formatAgentBadge(rawAg);
+        let b = engineBuckets.get(ag.cls);
+        if (!b) {
+          const nm = ag.cls === 'agy' ? 'AGY' : ag.cls === 'codex' ? 'CODEX' : ag.cls === 'opencode' ? 'OPENCODE' : ag.cls === 'claude' ? 'CLAUDE' : ag.cls === 'cursor' ? 'CURSOR' : ag.label;
+          b = { name: nm, color: ag.color, bots: 0, workers: 0 };
+          engineBuckets.set(ag.cls, b);
+        }
+        if (isBot) b.bots++; else b.workers++;
+      };
+      for (const b of data.bots || []) tallyEngine(b.agent, true);
+      for (const wk of data.workers || []) tallyEngine(wk.agent, false);
+      const engineList = [...engineBuckets.values()].sort((a, b) => (b.bots + b.workers) - (a.bots + a.workers));
+      const engineTotal = engineList.reduce((acc, x) => acc + x.bots + x.workers, 0) || 1;
+
+      // Dynamic 1920x1080 Cinema Layout Coordinates (leaves room for Header + Engine Mix Strip + Bottom Bar)
       const botBoxes = new Map();
       const botLeftX = 56, botW = 430;
       let squadBreaksCount = 0;
       for (let i = 1; i < orderedBots.length; i++) {
         if (orderedBots[i].squad !== orderedBots[i - 1].squad) squadBreaksCount++;
       }
-      const sqGap = orderedBots.length > 12 ? 10 : 16;
-      const rowGap = orderedBots.length > 12 ? 4 : 7;
-      const availBotH = 816;
+      const sqGap = orderedBots.length > 12 ? 8 : 14;
+      const rowGap = orderedBots.length > 12 ? 4 : 6;
+      const availBotH = 786;
       const botH = Math.max(
-        28,
-        Math.min(58, Math.floor((availBotH - squadBreaksCount * sqGap - Math.max(0, orderedBots.length - 1) * rowGap) / Math.max(1, orderedBots.length)))
+        26,
+        Math.min(54, Math.floor((availBotH - squadBreaksCount * sqGap - Math.max(0, orderedBots.length - 1) * rowGap) / Math.max(1, orderedBots.length)))
       );
-      let curY = 160;
+      let curY = 186;
       let prevSquad = null;
       for (const b of orderedBots) {
         if (prevSquad && prevSquad !== b.squad) curY += sqGap;
@@ -2169,24 +2201,24 @@
       const hostBoxes = new Map();
       const workerBoxes = new Map();
       const hostX = 1130, hostW = 754;
-      const availHostH = 876;
+      const availHostH = 852;
       const hostCount = Math.max(1, sortedHosts.length);
-      const podGap = hostCount >= 4 ? 10 : 16;
-      const weights = sortedHosts.map((h) => (h.metrics?.gpu ? 1.18 : 1.0));
+      const podGap = hostCount >= 4 ? 9 : 14;
+      const weights = sortedHosts.map((h) => (h.metrics?.gpu ? 1.16 : 1.0));
       const totalWeight = weights.reduce((a, b) => a + b, 0) || 1;
       const usableH = availHostH - (hostCount - 1) * podGap;
       const podHeights = sortedHosts.map((_, idx) => {
         const raw = Math.floor((usableH * weights[idx]) / totalWeight);
-        return Math.min(hostCount <= 2 ? 360 : 324, Math.max(132, raw));
+        return Math.min(hostCount <= 2 ? 350 : 316, Math.max(136, raw));
       });
-      let hy = 114;
+      let hy = 138;
       sortedHosts.forEach((h, idx) => {
         const ph = podHeights[idx] || 200;
-        const compactPod = ph < 225;
-        const gaugeR = ph < 185 ? 20 : compactPod ? 24 : ph < 265 ? 28 : 33;
-        const gaugeCy = 46 + gaugeR + 6;
-        const wStartOffset = h.metrics ? (gaugeCy + gaugeR + 38) : 56;
-        const wSlotH = compactPod ? 29 : 36;
+        const compactPod = ph < 220;
+        const gaugeR = ph < 185 ? 19 : compactPod ? 23 : ph < 260 ? 27 : 31;
+        const gaugeCy = 60 + gaugeR + 4;
+        const wStartOffset = h.metrics ? (gaugeCy + gaugeR + 36) : 74;
+        const wSlotH = compactPod ? 27 : 34;
         const maxWorkers = Math.max(0, Math.min(3, Math.floor((ph - wStartOffset - 8) / (wSlotH + 4))));
         const hWorkers = (data.workers || []).filter((w) => w.host === h.id).slice(0, maxWorkers);
         hostBoxes.set(h.id, {
@@ -2286,7 +2318,7 @@
         }
 
         // Top Cinema Command Header
-        roundRect(c, 36, 22, W - 72, 74, 12);
+        roundRect(c, 36, 18, W - 72, 70, 12);
         c.fillStyle = 'rgba(8, 16, 34, 0.92)';
         c.fill();
         c.strokeStyle = 'rgba(0, 240, 255, 0.34)';
@@ -2295,7 +2327,7 @@
 
         c.save();
         c.beginPath();
-        c.arc(70, 59, 8, 0, Math.PI * 2);
+        c.arc(70, 53, 8, 0, Math.PI * 2);
         c.fillStyle = '#00f0ff';
         c.shadowColor = '#00f0ff';
         c.shadowBlur = 18;
@@ -2303,13 +2335,13 @@
         c.restore();
 
         c.fillStyle = '#00f0ff';
-        c.font = 'bold 24px ui-monospace, Menlo, monospace';
+        c.font = 'bold 23px ui-monospace, Menlo, monospace';
         c.textAlign = 'left';
-        c.fillText('CYBER HQ // ALL-IN-ONE FLEET COMMAND WALL', 94, 54);
+        c.fillText('CYBER HQ // ALL-IN-ONE FLEET COMMAND WALL', 94, 49);
         c.fillStyle = '#7b95b8';
-        c.font = '13px ui-monospace, Menlo, monospace';
+        c.font = '12.5px ui-monospace, Menlo, monospace';
         const ctrlLbl = botHostCount > 1 ? ('MULTI-HOST · ' + botHostCount + ' CTRL') : ('@' + (data.controlHostLabel || 'CONTROL'));
-        c.fillText('LIVE MULTI-HOST TOPOLOGY · BOT BRAINS (' + ctrlLbl + ') → ORCA MESH → COMPUTE MACHINES & WORKERS', 94, 78);
+        c.fillText('LIVE MULTI-HOST TOPOLOGY · BOT BRAINS (' + ctrlLbl + ') → ORCA MESH → COMPUTE MACHINES & WORKERS', 94, 72);
 
         // Right KPI chips + REC timecode
         const recBlink = Math.floor(tSec * 2) % 2 === 0;
@@ -2320,32 +2352,62 @@
         ];
         let kx = 1320;
         for (const kp of kpis) {
-          roundRect(c, kx, 37, 126, 44, 8);
+          roundRect(c, kx, 31, 126, 44, 8);
           c.fillStyle = 'rgba(11, 22, 46, 0.95)';
           c.fill();
           c.strokeStyle = 'rgba(0, 240, 255, 0.25)';
           c.stroke();
           c.fillStyle = '#7b95b8';
           c.font = '11px ui-monospace, Menlo, monospace';
-          c.fillText(kp.l, kx + 12, 55);
+          c.fillText(kp.l, kx + 12, 49);
           c.fillStyle = kp.col;
           c.font = 'bold 18px ui-monospace, Menlo, monospace';
-          c.fillText(kp.v, kx + 12, 74);
+          c.fillText(kp.v, kx + 12, 68);
           kx += 138;
         }
         // REC timecode badge
-        roundRect(c, 1742, 37, 124, 44, 8);
+        roundRect(c, 1742, 31, 124, 44, 8);
         c.fillStyle = 'rgba(255, 42, 133, 0.16)';
         c.fill();
         c.strokeStyle = '#ff2a85';
         c.stroke();
         c.beginPath();
-        c.arc(1760, 59, 5, 0, Math.PI * 2);
+        c.arc(1760, 53, 5, 0, Math.PI * 2);
         c.fillStyle = recBlink ? '#ff2a85' : 'rgba(255, 42, 133, 0.3)';
         c.fill();
         c.fillStyle = '#fff';
         c.font = 'bold 14px ui-monospace, Menlo, monospace';
-        c.fillText('00:0' + Math.min(8, Math.floor(tSec)) + '.' + Math.floor((tSec % 1) * 10), 1774, 64);
+        c.fillText('00:0' + Math.min(8, Math.floor(tSec)) + '.' + Math.floor((tSec % 1) * 10), 1774, 58);
+
+        // Engine Mix Bar Strip (matching live panel)
+        roundRect(c, 36, 96, W - 72, 32, 7);
+        c.fillStyle = 'rgba(7, 15, 32, 0.92)';
+        c.fill();
+        c.strokeStyle = 'rgba(0, 240, 255, 0.22)';
+        c.lineWidth = 1;
+        c.stroke();
+        c.fillStyle = '#7b95b8';
+        c.font = 'bold 11px ui-monospace, Menlo, monospace';
+        c.textAlign = 'left';
+        c.fillText('ENGINE MIX', 52, 116);
+        let segX = 148;
+        const barW = 980;
+        for (const eg of engineList) {
+          const sw = Math.max(24, Math.round(((eg.bots + eg.workers) / engineTotal) * barW));
+          roundRect(c, segX, 107, Math.min(sw - 3, 148 + barW - segX), 10, 5);
+          c.fillStyle = eg.color;
+          c.fill();
+          segX += sw;
+        }
+        let chipX = 1152;
+        for (const eg of engineList.slice(0, 5)) {
+          const lbl = eg.name + ' ' + eg.bots + 'B·' + eg.workers + 'W';
+          c.fillStyle = eg.color;
+          c.font = 'bold 11px ui-monospace, Menlo, monospace';
+          c.fillText('● ' + lbl, chipX, 116);
+          chipX += Math.max(122, lbl.length * 7.8 + 26);
+          if (chipX > W - 120) break;
+        }
 
         // Center Arena: Motes + Triple Counter-Rotating Holographic Radar + Oscilloscope
         const rcx = 810, rcy = 510, rMax = 215;
@@ -2519,28 +2581,28 @@
         }
 
         // Left Bay Frame: BOT BRAINS
-        roundRect(c, 36, 114, 470, 876, 12);
+        roundRect(c, 36, 138, 470, 852, 12);
         c.fillStyle = 'rgba(6, 12, 26, 0.88)';
         c.fill();
         c.strokeStyle = 'rgba(0, 240, 255, 0.30)';
         c.lineWidth = 1.5;
         c.stroke();
 
-        roundRect(c, 50, 124, 442, 26, 6);
+        roundRect(c, 50, 148, 442, 26, 6);
         c.fillStyle = 'rgba(0, 240, 255, 0.11)';
         c.fill();
         c.fillStyle = '#00f0ff';
         c.font = 'bold 12px ui-monospace, Menlo, monospace';
         c.textAlign = 'left';
-        c.fillText('BOT BRAINS · ' + ctrlLbl + ' (' + orderedBots.length + ' BOTS)', 62, 141);
+        c.fillText('BOT BRAINS · ' + ctrlLbl + ' (' + orderedBots.length + ' BOTS)', 62, 165);
 
         // Vertical Command Spine + moving spark
         c.save();
-        c.beginPath(); c.moveTo(46, 162); c.lineTo(46, 976);
+        c.beginPath(); c.moveTo(46, 184); c.lineTo(46, 976);
         c.strokeStyle = 'rgba(0, 240, 255, 0.45)';
         c.lineWidth = 2.2;
         c.stroke();
-        const sy = 162 + ((tSec * 0.25) % 1) * 814;
+        const sy = 184 + ((tSec * 0.25) % 1) * 792;
         c.beginPath(); c.arc(46, sy, 4, 0, Math.PI * 2);
         c.fillStyle = '#00f0ff'; c.shadowColor = '#00f0ff'; c.shadowBlur = 12; c.fill();
         c.restore();
@@ -2632,14 +2694,26 @@
 
           const owner = hostOwnerInfo(h, data.bots || []);
           c.fillStyle = owner.cls === 'gpu' ? '#ffd46b' : owner.cls === 'qa' ? '#cbb2ff' : '#00f0ff';
-          c.font = '10.5px ui-monospace, Menlo, monospace';
+          c.font = '10px ui-monospace, Menlo, monospace';
           c.textAlign = 'left';
-          c.fillText(truncText(owner.text + '  ·  ' + h.endpoint.replace(/^ws:\/\//, ''), 76), hb.x + 16, hb.y + 42);
+          c.fillText(truncText(owner.text + '  ·  ' + h.endpoint.replace(/^ws:\/\//, ''), 76), hb.x + 16, hb.y + 40);
 
           const m = h.metrics;
+          // Explicit Full Machine Load Strip (CPU / Load / RAM / Disk / GPU / VRAM)
+          const loadLine = m
+            ? (
+                'CPU ' + m.cpuPct + '% (LD ' + m.load1 + ')  ·  RAM ' + m.ramUsedGb + '/' + m.ramTotalGb + 'G (' + m.ramPct + '%)  ·  DISK ' + m.diskPct + '% (' + m.diskFreeGb + 'G FREE)' +
+                (m.gpu ? ('  ·  ' + (m.gpu.name || 'GPU') + ' ' + m.gpu.utilPct + '% (' + m.gpu.tempC + '°C · ' + m.gpu.powerW + 'W)') : '')
+              )
+            : 'TELEMETRY STANDBY · NO HARDWARE METRICS YET';
+          c.fillStyle = m ? '#9ad8ff' : '#7b95b8';
+          c.font = 'bold 10px ui-monospace, Menlo, monospace';
+          c.textAlign = 'left';
+          c.fillText(truncText(loadLine, 94), hb.x + 16, hb.y + 55);
+
           if (m) {
             const wobble = Math.sin(tSec * 2.4 + hb.y) * 1.2;
-            const gr = hb.gaugeR || 28;
+            const gr = hb.gaugeR || 26;
             const gcy = hb.y + (hb.gaugeCy || 92);
             if (m.gpu) {
               const vramPct = m.gpu.vramTotalMiB > 0 ? Math.round((m.gpu.vramUsedMiB / m.gpu.vramTotalMiB) * 100) : 0;
@@ -2831,11 +2905,13 @@
 
       if (saved && saved.saved) {
         const mb = (saved.bytes / (1024 * 1024)).toFixed(2);
-        showToast('✓ Exported ~/Downloads/' + fname + ' (' + mb + 'MB)');
+        const prettyPath = saved.path ? saved.path.replace(/^\/Users\/[^/]+/, '~') : ('~/Downloads/' + fname);
+        showToast('✓ Exported ' + prettyPath + ' (' + mb + 'MB)');
       } else {
+        const reason = saved && saved.error ? saved.error : 'worker save failed';
         triggerBrowserDownload(blob, fname);
         const mb = (blob.size / (1024 * 1024)).toFixed(2);
-        showToast('✓ Downloaded ' + fname + ' (' + mb + 'MB)');
+        showToast('! ' + reason + ' · browser download triggered (' + mb + 'MB)');
       }
     } catch (err) {
       showToast('! Export failed: ' + (err && err.message ? err.message : 'unknown error'));

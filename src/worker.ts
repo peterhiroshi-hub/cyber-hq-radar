@@ -305,10 +305,32 @@ export async function defaultVideoSaver(input: SaveVideoInput): Promise<SaveVide
     ? path.basename(input.filename).replace(/[^a-zA-Z0-9._-]/g, '_')
     : `cyber-hq-radar-${stamp}.${format}`
   const finalName = cleanName.endsWith(`.${format}`) ? cleanName : `${cleanName}.${format}`
-  const downloadsDir = path.join(os.homedir(), 'Downloads')
-  await fs.mkdir(downloadsDir, { recursive: true })
-  const outPath = path.join(downloadsDir, finalName)
-  await fs.writeFile(outPath, bytesBuf)
+  const candidateDirs = [
+    path.join(os.homedir(), 'Downloads'),
+    path.join(os.homedir(), 'CyberHQ-Videos')
+  ]
+  let outPath = ''
+  let lastErr: unknown = null
+  for (const dir of candidateDirs) {
+    try {
+      await fs.mkdir(dir, { recursive: true })
+      const targetPath = path.join(dir, finalName)
+      await fs.writeFile(targetPath, bytesBuf)
+      outPath = targetPath
+      break
+    } catch (err) {
+      lastErr = err
+    }
+  }
+  if (!outPath) {
+    return {
+      saved: false,
+      path: null,
+      bytes: 0,
+      format,
+      error: lastErr instanceof Error ? lastErr.message : 'Unable to write video file to disk'
+    }
+  }
   if (input.reveal !== false && os.platform() === 'darwin') {
     await execFileAsync('open', ['-R', outPath], { timeout: 3000 }).catch(() => null)
   }
@@ -1534,7 +1556,7 @@ export default function activate(
       if (input?.uploadId && typeof input.totalChunks === 'number' && input.totalChunks > 1) {
         const total = Math.floor(input.totalChunks)
         const idx = Math.floor(input.chunkIndex ?? -1)
-        if (total > 512 || idx < 0 || idx >= total) {
+        if (total > 2048 || idx < 0 || idx >= total) {
           return { saved: false, path: null, bytes: 0, format, error: 'Invalid video chunk metadata' }
         }
         let slot = pendingVideoUploads.get(input.uploadId)
