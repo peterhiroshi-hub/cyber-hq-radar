@@ -1,0 +1,90 @@
+{
+  "manifestVersion": 2,
+  "id": "cyber-hq-radar",
+  "name": "Cyber HQ Radar",
+  "version": "0.1.0",
+  "description": "All-in-one cyberpunk fleet command dashboard for Orca: live Bots, multi-host workers, real-time CPU/RAM/Disk/GPU gauges, session jump, fullscreen wallboard, and 1080p video export.",
+  "engines": {
+    "orca": ">=1.4.274"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "cyber-hq-radar",
+        "title": "Cyber HQ Radar",
+        "icon": {
+          "path": "M12 2a10 10 0 1 0 10 10M12 6a6 6 0 1 0 6 6M12 12l7-7M12 12h.01",
+          "viewBox": "0 0 24 24",
+          "mode": "stroke"
+        },
+        "entry": "src/panel.html",
+        "ui": "html"
+      }
+    ],
+    "commands": [
+      {
+        "id": "cyber-hq-radar.refresh",
+        "title": "Cyber HQ: Refresh Fleet Radar"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "hq-status",
+        "text": "HQ · Booting",
+        "icon": "activity",
+        "tone": "accent",
+        "tooltip": "Cyber HQ Radar — Live Bots & Multi-Host Workers",
+        "command": "cyber-hq-radar.refresh"
+      }
+    ],
+    "settings": [
+      {
+        "key": "controlEnvironment",
+        "title": "Bot Control Environment",
+        "description": "Paired Orca environment that hosts your Bot control plane (leave blank for auto-detection: uses local Orca when Bots exist locally, otherwise auto-selects a paired environment with Bots).",
+        "type": "string",
+        "default": "",
+        "placeholder": "auto (e.g. mac-mini)"
+      },
+      {
+        "key": "sshTargets",
+        "title": "Remote SSH Targets",
+        "description": "Optional comma-separated envName=user@host map for remote CPU/RAM/Disk/GPU telemetry (e.g. mac-mini=user@100.x.y.z,gpu-box=user@100.x.y.w). Defaults to each paired environment's endpoint host or SSH config alias.",
+        "type": "string",
+        "default": "",
+        "placeholder": "envA=user@host,envB=user@host"
+      },
+      {
+        "key": "showLocalHost",
+        "title": "Show Local Machine Card",
+        "description": "Display this computer in the compute host column. Turn off on a dedicated monitoring laptop when you only want to watch remote paired servers.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "pollIntervalSec",
+        "title": "Refresh Interval (Seconds)",
+        "description": "How often Cyber HQ Radar sweeps fleet status and hardware telemetry.",
+        "type": "integer",
+        "default": 10,
+        "minimum": 5,
+        "maximum": 120
+      }
+    ],
+    "events": [
+      { "on": "agent.status.changed" },
+      { "on": "workspace.created" },
+      { "on": "workspace.removed" }
+    ]
+  },
+  "capabilities": [
+    { "kind": "workspace:read" },
+    { "kind": "workspace:write" },
+    { "kind": "agent:read" },
+    { "kind": "storage:own" },
+    { "kind": "settings:own" }
+  ]
+}

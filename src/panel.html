@@ -1,0 +1,2795 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Cyber HQ Radar</title>
+<style>
+  :root {
+    --bg: #030711;
+    --panel: rgba(8, 15, 30, 0.90);
+    --panel-deep: rgba(5, 10, 22, 0.94);
+    --cyan: #00f0ff;
+    --emerald: #00ff9d;
+    --magenta: #ff2a85;
+    --amber: #ffb800;
+    --violet: #a77bff;
+    --text: #e9f6ff;
+    --muted: #7b95b8;
+    --line: rgba(0, 240, 255, 0.22);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background:
+      radial-gradient(circle at 16% 8%, rgba(0, 240, 255, 0.13), transparent 40%),
+      radial-gradient(circle at 86% 28%, rgba(255, 42, 133, 0.11), transparent 42%),
+      radial-gradient(circle at 52% 92%, rgba(167, 123, 255, 0.10), transparent 45%),
+      linear-gradient(180deg, #03060f 0%, #060c1b 100%);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 11px;
+    line-height: 1.35;
+    padding: 7px;
+    overflow-x: hidden;
+    position: relative;
+    min-height: 100vh;
+  }
+
+  /* Subtle cyber grid + scanline atmosphere */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(rgba(0, 240, 255, 0.032) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0, 240, 255, 0.032) 1px, transparent 1px);
+    background-size: 22px 22px;
+    z-index: 0;
+  }
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0) 0px,
+      rgba(0, 0, 0, 0) 2px,
+      rgba(0, 240, 255, 0.018) 3px
+    );
+    z-index: 0;
+  }
+
+  .hud {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .box {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    position: relative;
+    box-shadow: 0 0 24px rgba(0, 240, 255, 0.06), inset 0 0 18px rgba(0, 240, 255, 0.025);
+  }
+
+  /* Compact Tactical Header + Inline KPIs */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 7px 9px;
+    flex-wrap: wrap;
+  }
+  .brand { display: flex; align-items: center; gap: 7px; min-width: 0; }
+  .pulse-beacon {
+    width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+    background: var(--cyan);
+    box-shadow: 0 0 10px var(--cyan), 0 0 18px var(--cyan);
+    animation: beacon 1.8s infinite ease-in-out;
+  }
+  @keyframes beacon {
+    0%, 100% { transform: scale(0.9); opacity: 0.72; }
+    50% { transform: scale(1.26); opacity: 1; }
+  }
+  .brand-title {
+    font-family: var(--mono); font-size: 11.5px; font-weight: 800;
+    letter-spacing: 0.09em; color: var(--cyan);
+    text-shadow: 0 0 12px rgba(0, 240, 255, 0.5);
+  }
+  .brand-sub { font-family: var(--mono); font-size: 9px; color: var(--muted); }
+
+  .top-right { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+  .kpi-chip {
+    display: inline-flex; align-items: baseline; gap: 4px;
+    background: rgba(9, 19, 38, 0.92);
+    border: 1px solid rgba(0, 240, 255, 0.22);
+    border-radius: 5px;
+    padding: 2.5px 6px;
+    font-family: var(--mono);
+  }
+  .kpi-chip .kl { font-size: 8px; color: var(--muted); letter-spacing: 0.05em; }
+  .kpi-chip .kv { font-size: 10.5px; font-weight: 800; color: var(--cyan); }
+  .kpi-chip.ok .kv { color: var(--emerald); text-shadow: 0 0 8px rgba(0, 255, 157, 0.35); }
+  .kpi-chip.hot .kv { color: var(--magenta); text-shadow: 0 0 8px rgba(255, 42, 133, 0.45); }
+
+  button.cyber-btn {
+    background: rgba(0, 240, 255, 0.09); color: var(--cyan);
+    border: 1px solid rgba(0, 240, 255, 0.45); border-radius: 5px;
+    padding: 3px 8px; font-family: var(--mono); font-size: 9.5px; font-weight: 700;
+    cursor: pointer; letter-spacing: 0.06em; transition: all 0.15s ease;
+    position: relative; overflow: hidden;
+  }
+  button.cyber-btn:hover {
+    background: rgba(0, 240, 255, 0.2);
+    box-shadow: 0 0 12px rgba(0, 240, 255, 0.35);
+  }
+  button.cyber-btn.rec-btn {
+    color: #ff6aa8;
+    border-color: rgba(255, 42, 133, 0.55);
+    background: rgba(255, 42, 133, 0.10);
+  }
+  button.cyber-btn.rec-btn:hover {
+    background: rgba(255, 42, 133, 0.22);
+    box-shadow: 0 0 14px rgba(255, 42, 133, 0.42);
+  }
+  button.cyber-btn.rec-btn.recording {
+    color: #fff;
+    background: rgba(255, 42, 133, 0.85);
+    border-color: #fff;
+    box-shadow: 0 0 18px rgba(255, 42, 133, 0.72);
+    animation: beacon 0.9s infinite;
+  }
+  button.cyber-btn.fs-btn {
+    color: var(--emerald);
+    border-color: rgba(0, 255, 157, 0.50);
+    background: rgba(0, 255, 157, 0.09);
+  }
+  button.cyber-btn.fs-btn:hover {
+    background: rgba(0, 255, 157, 0.22);
+    box-shadow: 0 0 14px rgba(0, 255, 157, 0.38);
+  }
+  button.cyber-btn:disabled { opacity: 0.78; cursor: wait; }
+
+  /* Fullscreen Wallboard Widescreen Enhancements */
+  body.wall-mode {
+    padding: 14px 18px;
+    font-size: 13px;
+  }
+  body.wall-mode .hud {
+    min-height: calc(100vh - 28px);
+    gap: 10px;
+  }
+  body.wall-mode .topbar { padding: 10px 16px; }
+  body.wall-mode .brand-title { font-size: 16px; }
+  body.wall-mode .brand-sub { font-size: 11px; }
+  body.wall-mode .kpi-chip .kl { font-size: 10px; }
+  body.wall-mode .kpi-chip .kv { font-size: 14px; }
+  body.wall-mode button.cyber-btn { font-size: 11.5px; padding: 5px 12px; }
+  body.wall-mode .deck-stage {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 12px 14px;
+  }
+  body.wall-mode .deck-grid {
+    flex: 1;
+    grid-template-columns: minmax(250px, 340px) minmax(240px, 1fr) minmax(460px, 600px);
+    gap: 14px;
+  }
+  body.wall-mode .brain-bay { padding: 10px; gap: 6px; justify-content: space-between; }
+  body.wall-mode .bot-node { padding: 6px 12px 6px 9px; }
+  body.wall-mode .bot-label { font-size: 12px; }
+  body.wall-mode .bot-task { font-size: 10px; }
+  body.wall-mode .route-tag { font-size: 9.5px; padding: 1px 6px; }
+  body.wall-mode .host-pod { padding: 10px 12px 10px 14px; }
+  body.wall-mode .host-hdr { font-size: 13px; }
+  body.wall-mode .host-meta { font-size: 10px; }
+  body.wall-mode .host-owner-line { font-size: 10px; padding: 3px 7px; margin: 5px 0 7px; }
+  body.wall-mode .gauge svg { width: 64px; height: 50px; }
+  body.wall-mode .gauge-lbl { font-size: 10px; }
+  body.wall-mode .gauge-sub { font-size: 9.5px; }
+  body.wall-mode .worker-slot { padding: 6px 9px 6px 11px; }
+  body.wall-mode .ws-title { font-size: 11.5px; }
+  body.wall-mode .ws-sub, body.wall-mode .ws-task { font-size: 10px; }
+  body.wall-mode .inspector { font-size: 11px; padding: 7px 14px; }
+  body.wall-mode .log-list { font-size: 10.5px; max-height: 72px; }
+
+  /* ALL-IN-ONE 3-LAYER COMMAND DECK */
+  .deck-stage {
+    position: relative;
+    padding: 7px;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 42% 50%, rgba(0, 240, 255, 0.065), rgba(4, 8, 18, 0.95) 68%);
+  }
+  /* Corner tactical brackets */
+  .deck-stage::before, .deck-stage::after {
+    content: "";
+    position: absolute;
+    width: 12px; height: 12px;
+    pointer-events: none;
+    z-index: 3;
+  }
+  .deck-stage::before {
+    top: 4px; left: 4px;
+    border-top: 2px solid rgba(0, 240, 255, 0.65);
+    border-left: 2px solid rgba(0, 240, 255, 0.65);
+  }
+  .deck-stage::after {
+    bottom: 4px; right: 4px;
+    border-bottom: 2px solid rgba(255, 42, 133, 0.65);
+    border-right: 2px solid rgba(255, 42, 133, 0.65);
+  }
+
+  #meshCanvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  .deck-head {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid rgba(0, 240, 255, 0.14);
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
+  .deck-head b { color: var(--cyan); }
+  .legend { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  .lg { display: inline-flex; align-items: center; gap: 3px; font-size: 8.5px; }
+  .lg-dot { width: 6px; height: 6px; border-radius: 50%; }
+
+  .deck-grid {
+    position: relative;
+    z-index: 2;
+    display: grid;
+    grid-template-columns: minmax(132px, 185px) minmax(76px, 1fr) minmax(218px, 320px);
+    gap: 4px;
+    align-items: stretch;
+  }
+
+  /* LEFT BAY: BOT BRAINS HOSTED ON CONTROL PLANE */
+  .brain-bay {
+    background: rgba(5, 11, 24, 0.90);
+    border: 1px solid rgba(0, 240, 255, 0.24);
+    border-radius: 7px;
+    padding: 5px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    contain: layout style;
+  }
+  .bay-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+    padding: 3px 5px;
+    border-radius: 4px;
+    background: rgba(0, 240, 255, 0.09);
+    border: 1px solid rgba(0, 240, 255, 0.28);
+    font-family: var(--mono);
+    font-size: 8px;
+    font-weight: 700;
+    color: var(--cyan);
+    letter-spacing: 0.05em;
+  }
+  .bay-banner span.host-pill {
+    color: #03121b;
+    background: var(--cyan);
+    padding: 0.5px 4px;
+    border-radius: 3px;
+    font-size: 7.5px;
+    font-weight: 800;
+  }
+
+  .squad-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    padding: 3px 3px 1px;
+    margin-top: 2px;
+    color: var(--muted);
+    border-top: 1px dashed rgba(120, 144, 178, 0.22);
+  }
+  .squad-hdr.command { border-top: none; margin-top: 0; color: var(--cyan); }
+
+  .bot-node {
+    position: relative;
+    background: rgba(9, 17, 35, 0.90);
+    border: 1px solid rgba(120, 144, 178, 0.22);
+    border-radius: 5px;
+    padding: 4px 10px 4px 6px;
+    cursor: pointer;
+    transition: border-color 0.16s, box-shadow 0.16s, transform 0.12s, opacity 0.18s;
+  }
+  .bot-node:hover {
+    border-color: var(--cyan);
+    box-shadow: 0 0 12px rgba(0, 240, 255, 0.25);
+    transform: translateX(1px);
+  }
+  .bot-node.command {
+    border-color: rgba(0, 240, 255, 0.48);
+    background: linear-gradient(135deg, rgba(0, 240, 255, 0.12), rgba(9, 17, 35, 0.94));
+  }
+  .bot-node.working {
+    border-color: rgba(255, 42, 133, 0.85);
+    box-shadow: 0 0 14px rgba(255, 42, 133, 0.28), inset 0 0 10px rgba(255, 42, 133, 0.12);
+    animation: hotBorder 2s infinite ease-in-out;
+    overflow: hidden;
+  }
+  .bot-node.working::after, .worker-slot.working::after {
+    content: "";
+    position: absolute;
+    top: 0; bottom: 0; width: 42%;
+    left: -50%;
+    background: linear-gradient(90deg, transparent, rgba(255, 42, 133, 0.26), rgba(0, 240, 255, 0.22), transparent);
+    pointer-events: none;
+    animation: laserSweep 2.4s infinite linear;
+  }
+  @keyframes laserSweep {
+    0% { left: -55%; }
+    100% { left: 120%; }
+  }
+  .bot-node.unread {
+    border-color: rgba(255, 184, 0, 0.62);
+    box-shadow: 0 0 8px rgba(255, 184, 0, 0.14);
+  }
+  @keyframes hotBorder {
+    0%, 100% { box-shadow: 0 0 10px rgba(255, 42, 133, 0.24), inset 0 0 8px rgba(255, 42, 133, 0.10); }
+    50% { box-shadow: 0 0 18px rgba(255, 42, 133, 0.45), inset 0 0 12px rgba(255, 42, 133, 0.20); }
+  }
+  .bot-node.dim { opacity: 0.34; }
+  .bot-node.hi { opacity: 1; border-color: #fff; box-shadow: 0 0 14px rgba(0, 240, 255, 0.48); }
+
+  .bot-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+  }
+  .bot-id { display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .led {
+    width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+    background: rgba(0, 240, 255, 0.7);
+  }
+  .led.working {
+    background: var(--magenta);
+    box-shadow: 0 0 8px var(--magenta), 0 0 14px var(--magenta);
+    animation: beacon 0.85s infinite;
+  }
+  .led.unread { background: var(--amber); box-shadow: 0 0 7px var(--amber); }
+
+  .bot-label {
+    font-size: 9.8px; font-weight: 700; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .bot-tags { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; }
+  .agent-badge {
+    display: inline-flex; align-items: center; gap: 2.5px;
+    font-family: var(--mono); font-size: 7.2px; font-weight: 800;
+    padding: 0.5px 4px 0.5px 3px; border-radius: 3px; flex-shrink: 0;
+    letter-spacing: 0.04em;
+    border: 1px solid currentColor;
+  }
+  .agent-icon { width: 9.5px; height: 9.5px; flex-shrink: 0; display: inline-block; }
+  .agent-badge.agy { color: #00f0ff; background: rgba(0, 240, 255, 0.11); border-color: rgba(0, 240, 255, 0.45); }
+  .agent-badge.codex { color: #00ff9d; background: rgba(0, 255, 157, 0.12); border-color: rgba(0, 255, 157, 0.50); }
+  .agent-badge.opencode { color: #ffb800; background: rgba(255, 184, 0, 0.13); border-color: rgba(255, 184, 0, 0.52); }
+  .agent-badge.claude { color: #ff7b54; background: rgba(255, 123, 84, 0.14); border-color: rgba(255, 123, 84, 0.52); }
+  .agent-badge.cursor { color: #b58cff; background: rgba(167, 123, 255, 0.14); border-color: rgba(167, 123, 255, 0.52); }
+  .agent-badge.other { color: #90d5ff; background: rgba(144, 213, 255, 0.11); border-color: rgba(144, 213, 255, 0.42); }
+  body.wall-mode .agent-badge { font-size: 9px; padding: 1px 5.5px 1px 4px; gap: 4px; }
+  body.wall-mode .agent-icon { width: 12px; height: 12px; }
+
+  /* Live Model / Engine Fleet Distribution Chart Strip */
+  .model-mix-strip {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 7px;
+    margin-bottom: 6px;
+    border-radius: 5px;
+    background: rgba(6, 13, 28, 0.86);
+    border: 1px solid rgba(0, 240, 255, 0.16);
+    font-family: var(--mono);
+    flex-wrap: wrap;
+  }
+  .mix-lbl { font-size: 8px; font-weight: 800; color: var(--muted); letter-spacing: 0.08em; flex-shrink: 0; }
+  .mix-bar {
+    flex: 1;
+    min-width: 72px;
+    height: 7px;
+    border-radius: 999px;
+    background: rgba(120, 144, 178, 0.14);
+    overflow: hidden;
+    display: flex;
+    gap: 2px;
+  }
+  .mix-seg { height: 100%; border-radius: 999px; transition: width 0.4s ease; }
+  .mix-chips { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+  .mix-chip {
+    display: inline-flex; align-items: center; gap: 3px;
+    font-size: 8px; font-weight: 700;
+    padding: 1px 5px; border-radius: 4px;
+    background: rgba(11, 21, 42, 0.9);
+    border: 1px solid rgba(120, 144, 178, 0.25);
+    color: var(--text);
+  }
+  .mix-chip .mc-cnt { opacity: 0.85; }
+  body.wall-mode .model-mix-strip { padding: 6px 12px; gap: 12px; margin-bottom: 8px; }
+  body.wall-mode .mix-lbl { font-size: 9.5px; }
+  body.wall-mode .mix-bar { height: 9px; }
+  body.wall-mode .mix-chip { font-size: 9.5px; padding: 2px 7px; gap: 4px; }
+
+  .route-tag {
+    font-family: var(--mono); font-size: 7.5px; font-weight: 700;
+    padding: 0.5px 3.5px; border-radius: 3px; flex-shrink: 0;
+    background: rgba(0, 240, 255, 0.08);
+    color: var(--muted);
+    border: 1px solid rgba(120, 144, 178, 0.25);
+  }
+  .route-tag.gpu { color: var(--amber); border-color: rgba(255, 184, 0, 0.45); background: rgba(255, 184, 0, 0.1); }
+  .route-tag.qa { color: var(--violet); border-color: rgba(167, 123, 255, 0.45); background: rgba(167, 123, 255, 0.12); }
+  .route-tag.live { color: var(--magenta); border-color: rgba(255, 42, 133, 0.65); background: rgba(255, 42, 133, 0.16); }
+
+  .bot-task {
+    margin-top: 2px;
+    font-family: var(--mono);
+    font-size: 8px;
+    color: #93c4e8;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .bot-task.live { color: #ff8bc0; }
+  .bot-task .tool-chip {
+    display: inline-block;
+    color: #04101c;
+    background: var(--cyan);
+    padding: 0 3px;
+    border-radius: 2px;
+    font-size: 7.5px;
+    font-weight: 800;
+    margin-right: 3px;
+  }
+
+  /* Port dots anchored to exact DOM geometry for Canvas conduits */
+  .port-out {
+    position: absolute;
+    right: -4px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #071326;
+    border: 1.5px solid rgba(0, 240, 255, 0.65);
+    z-index: 4;
+  }
+  .bot-node.working .port-out {
+    background: var(--magenta);
+    border-color: #fff;
+    box-shadow: 0 0 8px var(--magenta);
+  }
+
+  /* CENTER CORRIDOR: OPEN TAILSCALE RADAR ARENA */
+  .mesh-lane {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+    pointer-events: none;
+    min-height: 460px;
+  }
+  .mesh-pill {
+    font-family: var(--mono);
+    font-size: 7.8px;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    color: rgba(0, 240, 255, 0.72);
+    background: rgba(4, 10, 24, 0.78);
+    border: 1px solid rgba(0, 240, 255, 0.25);
+    border-radius: 999px;
+    padding: 1.5px 7px;
+    text-align: center;
+  }
+
+  /* RIGHT BAY: COMPUTE MACHINES (GAUGES + HOSTED WORKERS) */
+  .compute-bay {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 7px;
+  }
+
+  .host-pod {
+    position: relative;
+    background: rgba(6, 12, 26, 0.94);
+    border: 1px solid rgba(0, 240, 255, 0.26);
+    border-radius: 7px;
+    padding: 6px 7px 6px 9px;
+    transition: border-color 0.16s, opacity 0.16s;
+    contain: layout style;
+  }
+  .host-pod.active {
+    border-color: rgba(255, 42, 133, 0.72);
+    box-shadow: 0 0 18px rgba(255, 42, 133, 0.18);
+  }
+  .host-pod.dim { opacity: 0.38; }
+  .host-pod.hi { opacity: 1; border-color: var(--cyan); box-shadow: 0 0 16px rgba(0, 240, 255, 0.35); }
+
+  .host-port-in {
+    position: absolute;
+    left: -4.5px;
+    top: 22px;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #071326;
+    border: 1.5px solid var(--emerald);
+    box-shadow: 0 0 7px rgba(0, 255, 157, 0.5);
+    z-index: 4;
+  }
+  .host-pod.active .host-port-in {
+    background: var(--magenta);
+    border-color: #fff;
+    box-shadow: 0 0 10px var(--magenta);
+  }
+
+  .host-hdr {
+    display: flex; justify-content: space-between; align-items: center; gap: 4px;
+    font-family: var(--mono); font-size: 10px; font-weight: 800;
+  }
+  .host-name { color: var(--text); letter-spacing: 0.04em; }
+  .host-meta {
+    display: flex; justify-content: space-between; align-items: center; gap: 4px;
+    font-family: var(--mono); font-size: 8px; color: var(--muted);
+    margin-top: 1px;
+  }
+  .host-owner-line {
+    font-family: var(--mono);
+    font-size: 7.8px;
+    color: rgba(0, 240, 255, 0.85);
+    margin: 3px 0 5px;
+    padding: 2px 5px;
+    border-radius: 3px;
+    background: rgba(0, 240, 255, 0.07);
+    border-left: 2px solid var(--cyan);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .host-owner-line.gpu { color: #ffd46b; background: rgba(255, 184, 0, 0.08); border-left-color: var(--amber); }
+  .host-owner-line.qa { color: #cbb2ff; background: rgba(167, 123, 255, 0.09); border-left-color: var(--violet); }
+
+  .pill {
+    font-family: var(--mono); font-size: 7.8px; font-weight: 700;
+    padding: 1px 5px; border-radius: 999px; border: 1px solid currentColor;
+    flex-shrink: 0;
+  }
+  .pill.on { color: var(--emerald); }
+  .pill.off { color: var(--magenta); }
+  .pill.work { color: #fff; background: rgba(255, 42, 133, 0.85); border-color: var(--magenta); box-shadow: 0 0 8px rgba(255, 42, 133, 0.55); }
+  .pill.done { color: var(--emerald); background: rgba(0, 255, 157, 0.1); border-color: rgba(0, 255, 157, 0.45); }
+  .pill.idle { color: var(--cyan); border-color: rgba(0, 240, 255, 0.35); }
+
+  /* Compact Neon SVG Arc Gauges */
+  .gauges-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+  }
+  .gauges-gpu-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+    margin-top: 4px;
+  }
+  .gauge {
+    background: rgba(10, 19, 38, 0.78);
+    border: 1px solid rgba(0, 240, 255, 0.12);
+    border-radius: 5px;
+    padding: 3px 2px 3px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+  .gauge svg { width: 46px; height: 37px; overflow: visible; }
+  .gauge-track { fill: none; stroke: rgba(120, 144, 178, 0.22); stroke-width: 5.2; stroke-linecap: round; }
+  .gauge-fill {
+    fill: none; stroke-width: 5.2; stroke-linecap: round;
+    transition: stroke-dashoffset 0.5s cubic-bezier(.22,1,.36,1), stroke 0.3s;
+  }
+  .gauge-num {
+    font-family: var(--mono); font-size: 11px; font-weight: 800; fill: #f2f9ff;
+    text-anchor: middle; dominant-baseline: central;
+  }
+  .gauge-lbl {
+    font-family: var(--mono); font-size: 7.8px; font-weight: 800;
+    letter-spacing: 0.05em; margin-top: 1px;
+  }
+  .gauge-sub {
+    font-family: var(--mono); font-size: 7.4px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+    padding: 0 2px;
+  }
+
+  /* Nested Hosted Workers Dock inside Each Machine Pod */
+  .host-workers {
+    margin-top: 5px;
+    padding-top: 4px;
+    border-top: 1px dashed rgba(0, 240, 255, 0.18);
+    display: flex;
+    flex-direction: column;
+    gap: 3.5px;
+  }
+  .hw-hdr {
+    display: flex; justify-content: space-between; align-items: center;
+    font-family: var(--mono); font-size: 7.6px; color: var(--muted); letter-spacing: 0.06em;
+  }
+  .hw-empty {
+    font-family: var(--mono); font-size: 8px; color: rgba(123, 149, 184, 0.65);
+    padding: 2px 4px;
+    background: rgba(8, 16, 32, 0.55);
+    border-radius: 4px;
+  }
+  .worker-slot {
+    position: relative;
+    background: rgba(9, 18, 37, 0.92);
+    border: 1px solid rgba(0, 240, 255, 0.18);
+    border-left: 2.5px solid var(--cyan);
+    border-radius: 4px;
+    padding: 4px 5px 4px 7px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, transform 0.12s, opacity 0.18s;
+  }
+  .worker-slot:hover {
+    background: rgba(14, 28, 56, 0.98);
+    border-color: var(--cyan);
+    transform: translateX(-1px);
+  }
+  .worker-slot.working {
+    border-left-color: var(--magenta);
+    border-color: rgba(255, 42, 133, 0.58);
+    background: linear-gradient(90deg, rgba(255, 42, 133, 0.14), rgba(9, 18, 37, 0.95));
+    overflow: hidden;
+  }
+  .spark-wrap {
+    margin-top: 4px;
+    padding: 2px 4px;
+    background: rgba(6, 14, 30, 0.72);
+    border: 1px solid rgba(0, 240, 255, 0.12);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 5px;
+  }
+  .spark-lbl {
+    font-family: var(--mono);
+    font-size: 7px;
+    color: var(--muted);
+    letter-spacing: 0.05em;
+    flex-shrink: 0;
+  }
+  .spark-svg { width: 100%; height: 15px; display: block; overflow: visible; }
+  .worker-slot.succeeded { border-left-color: var(--emerald); }
+  .worker-slot.dim { opacity: 0.34; }
+  .worker-slot.hi { opacity: 1; border-color: #fff; box-shadow: 0 0 12px rgba(0, 240, 255, 0.45); }
+
+  .w-port-in {
+    position: absolute;
+    left: -13.5px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 6.5px; height: 6.5px; border-radius: 50%;
+    background: #061224;
+    border: 1.5px solid var(--cyan);
+    z-index: 4;
+  }
+  .worker-slot.working .w-port-in {
+    background: var(--magenta);
+    border-color: #fff;
+    box-shadow: 0 0 9px var(--magenta);
+  }
+  .worker-slot.succeeded .w-port-in { border-color: var(--emerald); }
+
+  .ws-top {
+    display: flex; align-items: center; justify-content: space-between; gap: 4px;
+  }
+  .ws-title {
+    font-family: var(--mono); font-size: 8.8px; font-weight: 700; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+  }
+  .ws-sub {
+    display: flex; align-items: center; justify-content: space-between; gap: 4px;
+    margin-top: 1.5px;
+    font-family: var(--mono); font-size: 7.7px; color: var(--muted);
+  }
+  .ws-via { color: #90d5ff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ws-jump { color: var(--cyan); font-weight: 800; flex-shrink: 0; }
+  .ws-task {
+    margin-top: 1.5px;
+    font-family: var(--mono); font-size: 7.6px; color: #b8d3ee;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* Inspector + Jump Toast Bar */
+  .inspector {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 5px 9px;
+    font-family: var(--mono);
+    font-size: 9px;
+    background: rgba(7, 16, 34, 0.94);
+    border-color: rgba(0, 240, 255, 0.28);
+  }
+  .insp-text {
+    color: #b8dcff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .insp-text b { color: var(--cyan); }
+  .insp-toast {
+    color: var(--emerald);
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  /* Compact Bottom Telemetry Ticker */
+  .ticker {
+    padding: 6px 9px;
+  }
+  .ticker-head {
+    display: flex; justify-content: space-between; align-items: center;
+    font-family: var(--mono); font-size: 8.5px; color: var(--muted); margin-bottom: 4px;
+    letter-spacing: 0.06em;
+  }
+  .ticker-head b { color: var(--cyan); }
+  .log-list {
+    font-family: var(--mono); font-size: 8.8px;
+    display: flex; flex-direction: column; gap: 2px;
+    max-height: 70px; overflow-y: auto;
+  }
+  .log-line { color: #9dbde0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .log-line span.ts { color: var(--cyan); margin-right: 5px; }
+</style>
+</head>
+<body>
+<div class="hud">
+  <div class="box topbar">
+    <div class="brand">
+      <div class="pulse-beacon"></div>
+      <div>
+        <div class="brand-title">CYBER HQ // ALL-IN-ONE COMMAND</div>
+        <div class="brand-sub" id="clockLine">SYNCING LIVE ORCA MESH...</div>
+      </div>
+    </div>
+    <div class="top-right">
+      <span class="kpi-chip"><span class="kl">BOTS</span><span class="kv" id="kpiBots">-</span></span>
+      <span class="kpi-chip ok"><span class="kl">NODES</span><span class="kv" id="kpiHosts">-</span></span>
+      <span class="kpi-chip hot"><span class="kl">ACTIVE</span><span class="kv" id="kpiActive">-</span></span>
+      <button class="cyber-btn fs-btn" id="fsBtn" title="一键全屏指挥墙展示">⛶ FULLSCREEN</button>
+      <button class="cyber-btn rec-btn" id="recBtn" title="导出 1080P 赛博效果视频到 ~/Downloads">● REC 1080P</button>
+      <button class="cyber-btn" id="scanBtn">SCAN</button>
+    </div>
+  </div>
+
+  <!-- HERO ALL-IN-ONE 3-LAYER INTERACTIVE COMMAND DECK -->
+  <div class="box deck-stage" id="deckStage">
+    <canvas id="meshCanvas"></canvas>
+
+    <div class="deck-head">
+      <span><b>// LIVE TEAM TOPOLOGY</b> · BOT BRAINS → TAILSCALE → MACHINES &amp; WORKERS</span>
+      <div class="legend">
+        <span class="lg"><span class="lg-dot" style="background:var(--magenta);box-shadow:0 0 6px var(--magenta)"></span>WORKING</span>
+        <span class="lg"><span class="lg-dot" style="background:var(--emerald)"></span>DONE</span>
+        <span class="lg"><span class="lg-dot" style="background:var(--amber)"></span>UNREAD</span>
+      </div>
+    </div>
+
+    <div class="model-mix-strip" id="modelMixStrip">
+      <span class="mix-lbl">ENGINE MIX</span>
+      <div class="mix-bar" id="mixBar"></div>
+      <div class="mix-chips" id="mixChips"></div>
+    </div>
+
+    <div class="deck-grid" id="deckGrid">
+      <div class="brain-bay" id="brainBay"></div>
+      <div class="mesh-lane">
+        <div class="mesh-pill">TAILSCALE MESH</div>
+        <div class="mesh-pill" id="meshStatusPill">LIVE LINK</div>
+      </div>
+      <div class="compute-bay" id="computeBay"></div>
+    </div>
+  </div>
+
+  <!-- LIVE HOVER INSPECTOR & JUMP FEEDBACK -->
+  <div class="box inspector">
+    <div class="insp-text" id="inspectorText"><b>[TIP]</b> 悬停任意 Bot / Worker / 主机高亮完整归属链路 · 点击直接跳入对应 Orca Session</div>
+    <div class="insp-toast" id="jumpToast"></div>
+  </div>
+
+  <!-- COMPACT LIVE TELEMETRY STREAM -->
+  <div class="box ticker">
+    <div class="ticker-head">
+      <span><b>// LIVE TELEMETRY STREAM</b></span>
+      <span id="workerCountHint">0 WORKERS</span>
+    </div>
+    <div class="log-list" id="eventList"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const orca = window.orca;
+  const urlParams = new URLSearchParams(window.location.search || '');
+  const wallMode = urlParams.get('wall') === '1';
+  const wallToken = urlParams.get('token') || '';
+  if (wallMode) document.body.classList.add('wall-mode');
+
+  async function apiRequest(name, payload) {
+    if (orca && orca.plugin) {
+      return orca.plugin.request(name, payload);
+    }
+    if (!wallToken) throw new Error('Bridge unavailable');
+    const q = '?token=' + encodeURIComponent(wallToken);
+    if (name === 'hq.getSnapshot') {
+      const r = await fetch('/api/snapshot' + q);
+      return r.json();
+    }
+    const routeMap = {
+      'hq.refresh': '/api/refresh',
+      'hq.openSession': '/api/open-session',
+      'hq.saveVideo': '/api/save-video'
+    };
+    const ep = routeMap[name];
+    if (!ep) throw new Error('Unsupported wall route: ' + name);
+    const r = await fetch(ep + q, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-HQ-Token': wallToken },
+      body: JSON.stringify(payload || {})
+    });
+    return r.json();
+  }
+
+  let snap = null;
+  let hovered = null; // { kind: 'bot'|'worker'|'host', id: string, botName?: string, hostId?: string }
+  let pinned = null;  // Locked highlight via click; cleared by clicking blank area or pressing ESC
+  let lastRenderSig = '';
+  let cachedLayout = null;
+  let cachedConduits = [];
+  let cachedLiveConduits = [];
+  let cachedRecentConduits = [];
+  let cachedStandbyConduits = [];
+  let rafId = 0;
+  let packets = [];
+  let ripples = [];
+  let sweepAngle = 0;
+  let ringAngle = 0;
+  let wavePhase = 0;
+  let toastTimer = null;
+  let isRecording = false;
+  const metricHist = new Map(); // hostId -> { cpu: number[], gpu: number[] }
+  const motes = Array.from({ length: 24 }, (_, i) => ({
+    rx: (i * 0.137 + 0.11) % 1,
+    ry: (i * 0.293 + 0.07) % 1,
+    vy: -0.00045 - (i % 5) * 0.00018,
+    r: 0.8 + (i % 3) * 0.55,
+    col: i % 3 === 0 ? '#00f0ff' : i % 3 === 1 ? '#a77bff' : '#00ff9d'
+  }));
+
+  const deckStage = document.getElementById('deckStage');
+  const brainBay = document.getElementById('brainBay');
+  const computeBay = document.getElementById('computeBay');
+  const inspectorText = document.getElementById('inspectorText');
+  const jumpToast = document.getElementById('jumpToast');
+  const scanBtn = document.getElementById('scanBtn');
+  const recBtn = document.getElementById('recBtn');
+  const fsBtn = document.getElementById('fsBtn');
+  const canvas = document.getElementById('meshCanvas');
+  const ctx = canvas.getContext('2d');
+
+  function pushMetricHist(hostId, cpuPct, gpuPct) {
+    let entry = metricHist.get(hostId);
+    if (!entry) {
+      entry = { cpu: [cpuPct, cpuPct, cpuPct], gpu: gpuPct != null ? [gpuPct, gpuPct, gpuPct] : [] };
+      metricHist.set(hostId, entry);
+      return entry;
+    }
+    entry.cpu.push(cpuPct);
+    if (entry.cpu.length > 14) entry.cpu.shift();
+    if (gpuPct != null) {
+      entry.gpu.push(gpuPct);
+      if (entry.gpu.length > 14) entry.gpu.shift();
+    }
+    return entry;
+  }
+
+  function renderSparkline(cpuArr, gpuArr) {
+    const W = 120, H = 15;
+    const toPts = (arr) => {
+      if (!arr || arr.length < 2) return '';
+      return arr.map((v, i) => {
+        const x = (i / (arr.length - 1)) * W;
+        const y = H - 2 - (Math.max(0, Math.min(100, v)) / 100) * (H - 4);
+        return x.toFixed(1) + ',' + y.toFixed(1);
+      }).join(' ');
+    };
+    const cpuPts = toPts(cpuArr);
+    const gpuPts = gpuArr && gpuArr.length > 1 ? toPts(gpuArr) : '';
+    const lastCpu = cpuArr[cpuArr.length - 1] ?? 0;
+    const strokeCol = gaugeColor(lastCpu, '#00f0ff');
+    return '<div class="spark-wrap">' +
+      '<span class="spark-lbl">' + (gpuPts ? 'CPU/GPU WAVE' : 'CPU WAVE') + '</span>' +
+      '<svg class="spark-svg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none">' +
+        (cpuPts ? '<polyline fill="none" stroke="' + strokeCol + '" stroke-width="1.5" points="' + cpuPts + '" />' : '') +
+        (gpuPts ? '<polyline fill="none" stroke="#ffb800" stroke-width="1.2" stroke-dasharray="2.5 1.5" points="' + gpuPts + '" />' : '') +
+      '</svg>' +
+    '</div>';
+  }
+
+  function fmtTime(ts) {
+    const d = new Date(ts || Date.now());
+    return d.toTimeString().slice(0, 8);
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function hostShort(hostId) {
+    const found = snap?.hosts?.find((h) => h.id === hostId);
+    if (found?.label) return found.label;
+    if (!hostId || hostId === 'local') return snap?.controlHostLabel || 'LOCAL';
+    return String(hostId).toUpperCase().slice(0, 14);
+  }
+
+  const SQUAD_PALETTE = ['#ffb800', '#ff2a85', '#a77bff', '#00ff9d', '#ff7b54'];
+  const squadColorCache = new Map();
+  function squadColor(squad) {
+    if (!squad || squad === 'command') return '#00f0ff';
+    if (!squadColorCache.has(squad)) {
+      squadColorCache.set(squad, SQUAD_PALETTE[squadColorCache.size % SQUAD_PALETTE.length]);
+    }
+    return squadColorCache.get(squad);
+  }
+
+  function sortHostsForDeck(hosts) {
+    return [...(hosts || [])].sort((a, b) => {
+      const rank = (h) => (h.isControlPlane ? 0 : h.metrics?.gpu ? 2 : 1);
+      const diff = rank(a) - rank(b);
+      if (diff !== 0) return diff;
+      return String(a.label || a.id).localeCompare(String(b.label || b.id));
+    });
+  }
+
+  function gaugeColor(pct, baseColor) {
+    if (pct >= 84) return '#ff2a85';
+    if (pct >= 62) return '#ffb800';
+    return baseColor || '#00f0ff';
+  }
+
+  function renderArcGauge(label, pct, subText, accent) {
+    const p = Math.max(0, Math.min(100, Math.round(pct || 0)));
+    const r = 17;
+    const cx = 23, cy = 22;
+    const startAngle = (150 * Math.PI) / 180;
+    const endAngle = (390 * Math.PI) / 180;
+    const x1 = cx + r * Math.cos(startAngle), y1 = cy + r * Math.sin(startAngle);
+    const x2 = cx + r * Math.cos(endAngle), y2 = cy + r * Math.sin(endAngle);
+    const arcPath = 'M ' + x1.toFixed(1) + ' ' + y1.toFixed(1) + ' A ' + r + ' ' + r + ' 0 1 1 ' + x2.toFixed(1) + ' ' + y2.toFixed(1);
+    const totalLen = 2 * Math.PI * r * (240 / 360);
+    const offset = totalLen * (1 - p / 100);
+    const col = gaugeColor(p, accent);
+
+    return '<div class="gauge">' +
+      '<svg viewBox="0 0 46 37">' +
+        '<path class="gauge-track" d="' + arcPath + '" />' +
+        '<path class="gauge-fill" d="' + arcPath + '" stroke="' + col + '" ' +
+          'style="stroke-dasharray:' + totalLen.toFixed(1) + ';stroke-dashoffset:' + offset.toFixed(1) + '" />' +
+        '<text class="gauge-num" x="23" y="23">' + p + '%</text>' +
+      '</svg>' +
+      '<div class="gauge-lbl" style="color:' + col + '">' + escapeHtml(label) + '</div>' +
+      '<div class="gauge-sub" title="' + escapeHtml(subText) + '">' + escapeHtml(subText) + '</div>' +
+    '</div>';
+  }
+
+  function agentIconSvg(cls) {
+    if (cls === 'agy') {
+      // Antigravity prism-arch emblem
+      return '<svg class="agent-icon" viewBox="0 0 16 16" fill="none">' +
+        '<path d="M2.5 13.5L7.1 2.8C7.5 1.9 8.5 1.9 8.9 2.8L13.5 13.5" stroke="#00f0ff" stroke-width="2" stroke-linecap="round"/>' +
+        '<path d="M5 9.8C6.6 8.3 9.4 8.3 11 9.8" stroke="#ff2a85" stroke-width="1.8" stroke-linecap="round"/>' +
+        '<circle cx="8" cy="5.6" r="1.2" fill="#ffffff"/>' +
+      '</svg>';
+    }
+    if (cls === 'codex') {
+      // OpenAI / Codex hexagonal neural core
+      return '<svg class="agent-icon" viewBox="0 0 16 16" fill="none">' +
+        '<polygon points="8,1.5 13.8,4.8 13.8,11.2 8,14.5 2.2,11.2 2.2,4.8" stroke="#00ff9d" stroke-width="1.6" fill="rgba(0,255,157,0.14)"/>' +
+        '<circle cx="8" cy="8" r="2.2" fill="#00ff9d"/>' +
+      '</svg>';
+    }
+    if (cls === 'opencode') {
+      // OpenCode terminal bracket glyph
+      return '<svg class="agent-icon" viewBox="0 0 16 16" fill="none">' +
+        '<rect x="1.8" y="2.4" width="12.4" height="11.2" rx="2.2" stroke="#ffb800" stroke-width="1.5" fill="rgba(255,184,0,0.12)"/>' +
+        '<path d="M4.8 6L7.3 8L4.8 10M8.5 10H11.4" stroke="#ffb800" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
+      '</svg>';
+    }
+    if (cls === 'claude') {
+      // Claude 8-ray starburst
+      return '<svg class="agent-icon" viewBox="0 0 16 16" fill="none">' +
+        '<path d="M8 1.5V14.5M1.5 8H14.5M3.4 3.4L12.6 12.6M12.6 3.4L3.4 12.6" stroke="#ff7b54" stroke-width="1.7" stroke-linecap="round"/>' +
+      '</svg>';
+    }
+    if (cls === 'cursor') {
+      // Cursor 3D pointer cube
+      return '<svg class="agent-icon" viewBox="0 0 16 16" fill="none">' +
+        '<path d="M8 1.5L14 5V11L8 14.5L2 11V5L8 1.5Z" stroke="#b58cff" stroke-width="1.5" fill="rgba(181,140,255,0.16)"/>' +
+        '<path d="M8 1.5V8M8 8L14 5M8 8L2 5" stroke="#b58cff" stroke-width="1.3"/>' +
+      '</svg>';
+    }
+    return '<svg class="agent-icon" viewBox="0 0 16 16" fill="none">' +
+      '<circle cx="8" cy="8" r="5.5" stroke="#90d5ff" stroke-width="1.5"/>' +
+      '<circle cx="8" cy="8" r="2" fill="#90d5ff"/>' +
+    '</svg>';
+  }
+
+  function renderAgentBadgeHtml(rawAgent) {
+    const ag = formatAgentBadge(rawAgent);
+    return '<span class="agent-badge ' + ag.cls + '" title="Agent / Model: ' + escapeHtml(ag.full) + '">' +
+      agentIconSvg(ag.cls) + '<span>' + escapeHtml(ag.label) + '</span></span>';
+  }
+
+  function renderModelMixChart(data) {
+    const mixBar = document.getElementById('mixBar');
+    const mixChips = document.getElementById('mixChips');
+    if (!mixBar || !mixChips) return;
+
+    const buckets = new Map(); // cls -> { cls, name, color, bots, workers, models: Map }
+    const ensure = (ag) => {
+      let b = buckets.get(ag.cls);
+      if (!b) {
+        const engineName = ag.cls === 'agy' ? 'AGY' : ag.cls === 'codex' ? 'CODEX' : ag.cls === 'opencode' ? 'OPENCODE' : ag.cls === 'claude' ? 'CLAUDE' : ag.cls === 'cursor' ? 'CURSOR' : ag.label;
+        b = { cls: ag.cls, name: engineName, color: ag.color, bots: 0, workers: 0, models: new Map() };
+        buckets.set(ag.cls, b);
+      }
+      if (ag.label.includes('·')) {
+        const sub = ag.label.split('·').slice(1).join('·');
+        b.models.set(sub, (b.models.get(sub) || 0) + 1);
+      }
+      return b;
+    };
+
+    for (const bot of data.bots || []) {
+      ensure(formatAgentBadge(bot.agent)).bots++;
+    }
+    for (const wk of data.workers || []) {
+      ensure(formatAgentBadge(wk.agent)).workers++;
+    }
+
+    const list = [...buckets.values()].sort((a, b) => (b.bots + b.workers) - (a.bots + a.workers));
+    const total = list.reduce((acc, x) => acc + x.bots + x.workers, 0) || 1;
+
+    mixBar.innerHTML = list.map((x) => {
+      const pct = Math.max(6, Math.round(((x.bots + x.workers) / total) * 100));
+      return '<div class="mix-seg" style="width:' + pct + '%;background:' + x.color + '"></div>';
+    }).join('');
+
+    mixChips.innerHTML = list.map((x) => {
+      const modelExtras = [...x.models.entries()].map(([m, cnt]) => m + '×' + cnt).join(' ');
+      const detail = x.bots + 'B·' + x.workers + 'W' + (modelExtras ? (' · ' + modelExtras) : '');
+      return '<span class="mix-chip" style="border-color:' + x.color + '55;color:' + x.color + '">' +
+        agentIconSvg(x.cls) +
+        '<span>' + escapeHtml(x.name) + '</span>' +
+        '<span class="mc-cnt" style="color:var(--text)">' + escapeHtml(detail) + '</span>' +
+      '</span>';
+    }).join('');
+  }
+
+  function formatAgentBadge(rawAgent) {
+    const raw = String(rawAgent || 'antigravity').trim();
+    const parts = raw.split('/');
+    const base = (parts[0] || 'antigravity').toLowerCase();
+    const modelRaw = parts.slice(1).join('/');
+    const compactModel = modelRaw
+      .replace(/^gemini-/i, '')
+      .replace(/^gpt-/i, '')
+      .replace(/^claude-/i, '')
+      .replace(/-xhigh$/i, '')
+      .replace(/-high$/i, '')
+      .replace(/hydrogen/i, 'HYD')
+      .replace(/neon/i, 'NEON')
+      .toUpperCase();
+
+    if (base.includes('antigravity') || base === 'agy') {
+      return {
+        label: compactModel ? ('AGY·' + compactModel) : 'AGY',
+        cls: 'agy',
+        color: '#00f0ff',
+        full: raw
+      };
+    }
+    if (base.includes('codex')) {
+      return {
+        label: compactModel ? ('CODEX·' + compactModel) : 'CODEX',
+        cls: 'codex',
+        color: '#00ff9d',
+        full: raw
+      };
+    }
+    if (base.includes('opencode')) {
+      return {
+        label: compactModel ? ('OPENCODE·' + compactModel) : 'OPENCODE',
+        cls: 'opencode',
+        color: '#ffb800',
+        full: raw
+      };
+    }
+    if (base.includes('claude')) {
+      return {
+        label: compactModel ? ('CLAUDE·' + compactModel) : 'CLAUDE',
+        cls: 'claude',
+        color: '#ff7b54',
+        full: raw
+      };
+    }
+    if (base.includes('cursor')) {
+      return {
+        label: compactModel ? ('CURSOR·' + compactModel) : 'CURSOR',
+        cls: 'cursor',
+        color: '#b58cff',
+        full: raw
+      };
+    }
+    const shortBase = base.toUpperCase().slice(0, 8);
+    return {
+      label: compactModel ? (shortBase + '·' + compactModel) : shortBase,
+      cls: 'other',
+      color: '#90d5ff',
+      full: raw
+    };
+  }
+
+  function routeBadgeForBot(b) {
+    if (b.state === 'working') return { text: b.activeDispatchCount > 0 ? (b.activeDispatchCount + 'W LIVE') : 'LIVE', cls: 'live' };
+    const target = snap?.hosts?.find((h) => h.id === b.primaryHost);
+    if (target && !target.isControlPlane) {
+      if (target.metrics?.gpu) return { text: '→GPU', cls: 'gpu' };
+      if (b.role === 'qa') return { text: '→QA', cls: 'qa' };
+      return { text: '→' + target.label.slice(0, 6), cls: 'qa' };
+    }
+    const ctrl = (snap?.controlHostLabel || 'CTRL').slice(0, 5);
+    return { text: '@' + ctrl, cls: '' };
+  }
+
+  function hostOwnerInfo(h, bots) {
+    if (h.isControlPlane) {
+      const hostedBots = bots.filter((b) => (b.botHost || 'local') === h.id).length;
+      return { text: 'OWNERSHIP: ' + hostedBots + ' BOT BRAINS + LOCAL WORKERS', cls: '' };
+    }
+    const dispatchers = bots
+      .filter((b) => b.primaryHost === h.id || b.secondaryHost === h.id)
+      .map((b) => (b.shortName || b.name).toUpperCase());
+    if (dispatchers.length > 0) {
+      return {
+        text: 'DISPATCHED BY: ' + dispatchers.slice(0, 4).join(' · '),
+        cls: h.metrics?.gpu ? 'gpu' : 'qa'
+      };
+    }
+    return { text: h.role || 'PAIRED ORCA COMPUTE NODE', cls: h.metrics?.gpu ? 'gpu' : '' };
+  }
+
+  function orderBotGroups(bots) {
+    const roleRank = { copilot: 0, leader: 1, product: 2, delivery: 3, qa: 4, release: 5, other: 6 };
+    const sortFn = (a, b) => (roleRank[a.role] ?? 9) - (roleRank[b.role] ?? 9);
+    const bySquad = new Map();
+    for (const b of bots || []) {
+      const sq = b.squad || 'fleet';
+      if (!bySquad.has(sq)) bySquad.set(sq, []);
+      bySquad.get(sq).push(b);
+    }
+    const orderedKeys = [...bySquad.keys()].sort((a, b) => {
+      if (a === 'command') return -1;
+      if (b === 'command') return 1;
+      return a.localeCompare(b);
+    });
+    return orderedKeys.map((sq) => ({
+      squad: sq,
+      label: sq === 'command' ? 'COMMAND' : sq === 'fleet' ? 'BOT FLEET' : (sq.toUpperCase() + ' SQUAD'),
+      color: squadColor(sq),
+      bots: bySquad.get(sq).sort(sortFn)
+    }));
+  }
+
+  function renderBotCard(b) {
+    const cls = [
+      'bot-node',
+      b.squad === 'command' ? 'command' : '',
+      b.state === 'working' ? 'working' : b.state === 'unread' ? 'unread' : ''
+    ].filter(Boolean).join(' ');
+    const ledCls = b.state === 'working' ? 'working' : b.state === 'unread' ? 'unread' : '';
+    const rt = routeBadgeForBot(b);
+    const ag = formatAgentBadge(b.agent);
+
+    let taskLine = '';
+    if (b.state === 'working' || b.activeSessionTitle) {
+      const toolHtml = b.activeToolName ? '<span class="tool-chip">' + escapeHtml(b.activeToolName) + '</span>' : '';
+      const txt = b.activeSessionTitle || (b.activeDispatchCount > 0 ? ('Running ' + b.activeDispatchCount + ' worker(s)') : 'Active session');
+      taskLine = '<div class="bot-task ' + (b.state === 'working' ? 'live' : '') + '" title="' + escapeHtml(txt) + '">' +
+        toolHtml + escapeHtml(txt) + '</div>';
+    }
+
+    return '<div class="' + cls + '" data-bot-name="' + escapeHtml(b.name) + '" data-bot-id="' + escapeHtml(b.id) + '" ' +
+      'data-ws="' + escapeHtml(b.workspaceId || '') + '" data-host="' + escapeHtml(b.botHost || 'local') + '">' +
+      '<div class="bot-top">' +
+        '<div class="bot-id"><span class="led ' + ledCls + '"></span>' +
+        '<span class="bot-label" title="' + escapeHtml(b.name) + '">' + escapeHtml(b.shortName || b.name) + '</span></div>' +
+        '<div class="bot-tags">' +
+          renderAgentBadgeHtml(b.agent) +
+          '<span class="route-tag ' + rt.cls + '">' + escapeHtml(rt.text) + '</span>' +
+        '</div>' +
+      '</div>' +
+      taskLine +
+      '<span class="port-out"></span>' +
+    '</div>';
+  }
+
+  function renderWorkerSlot(w) {
+    const pillCls = w.state === 'working' ? 'work' : w.state === 'succeeded' ? 'done' : 'idle';
+    const matchedBot = w.bot ? snap?.bots?.find((b) => b.name === w.bot) : null;
+    const viaBot = w.bot ? ('via ' + (matchedBot?.shortName || w.bot)) : ('@ ' + hostShort(w.host));
+    const taskTxt = w.sessionTitle || (w.branch ? ('branch: ' + w.branch) : w.workspacePath);
+    const toolChip = w.activeToolName ? ('[' + w.activeToolName + '] ') : '';
+
+    return '<div class="worker-slot ' + escapeHtml(w.state) + '" ' +
+      'data-worker-id="' + escapeHtml(w.id) + '" ' +
+      'data-worker-bot="' + escapeHtml(w.bot || '') + '" ' +
+      'data-worker-host="' + escapeHtml(w.host) + '" ' +
+      'data-ws="' + escapeHtml(w.workspaceId || '') + '" ' +
+      'data-wpath="' + escapeHtml(w.workspacePath || '') + '" ' +
+      'data-term="' + escapeHtml(w.terminalId || '') + '" ' +
+      'data-session="' + escapeHtml(w.sessionId || '') + '" ' +
+      'data-fallback-ws="' + escapeHtml(w.parentBotWorkspaceId || '') + '">' +
+      '<span class="w-port-in"></span>' +
+      '<div class="ws-top">' +
+        '<span class="ws-title" title="' + escapeHtml(w.title) + '">' + escapeHtml(w.title) + '</span>' +
+        '<span class="pill ' + pillCls + '">' + escapeHtml(w.state.toUpperCase()) + '</span>' +
+      '</div>' +
+      '<div class="ws-sub">' +
+        '<span class="ws-via">' + escapeHtml(viaBot) + '</span>' +
+        '<span class="bot-tags">' +
+          renderAgentBadgeHtml(w.agent) +
+          '<span class="ws-jump" title="Jump to Orca session">↗</span>' +
+        '</span>' +
+      '</div>' +
+      (taskTxt ? '<div class="ws-task" title="' + escapeHtml(taskTxt) + '">' + escapeHtml(toolChip + taskTxt) + '</div>' : '') +
+    '</div>';
+  }
+
+  function renderDom(data) {
+    if (!data) return;
+    document.getElementById('clockLine').textContent = 'LIVE SWEEP ' + fmtTime(data.generatedAt) + ' · TAILSCALE MESH';
+    document.getElementById('kpiBots').textContent = data.summary.workingBots + '/' + data.summary.totalBots;
+    document.getElementById('kpiHosts').textContent = data.summary.onlineHosts + '/' + data.hosts.length;
+    document.getElementById('kpiActive').textContent = String(data.summary.activeWorkers);
+    document.getElementById('workerCountHint').textContent = data.workers.length + ' WORKERS TRACKED';
+    document.getElementById('meshStatusPill').textContent =
+      data.summary.activeWorkers > 0 ? (data.summary.activeWorkers + ' LIVE FLOWS') : 'MESH READY';
+
+    const sig = JSON.stringify({ h: data.hosts, b: data.bots, w: data.workers, e: (data.events || []).slice(0, 6) });
+    if (sig === lastRenderSig) return;
+    lastRenderSig = sig;
+    renderModelMixChart(data);
+
+    // Left Bay: All Bots explicitly grouped inside Control Plane chassis
+    const groups = orderBotGroups(data.bots || []);
+    const ctrlLabel = data.controlHostLabel || 'LOCAL';
+    let brainHtml =
+      '<div class="bay-banner"><span>BOT BRAINS</span><span class="host-pill">@' + escapeHtml(ctrlLabel) + '</span></div>';
+    for (const g of groups) {
+      brainHtml += '<div class="squad-hdr ' + (g.squad === 'command' ? 'command' : '') + '" style="color:' + g.color + '">' +
+        '<span>' + escapeHtml(g.label) + '</span><span>' + g.bots.length + '</span></div>' +
+        g.bots.map(renderBotCard).join('');
+    }
+    if (!groups.length) {
+      brainHtml += '<div class="hw-empty">NO BOTS DETECTED</div>';
+    }
+    brainBay.innerHTML = brainHtml;
+
+    // Right Bay: Compute Pods with Live Gauges + Nested Hosted Workers
+    const sortedHosts = sortHostsForDeck(data.hosts || []);
+
+    computeBay.innerHTML = sortedHosts.map((h) => {
+      const m = h.metrics;
+      let gaugesHtml = '<div class="hw-empty">TELEMETRY STANDBY...</div>';
+      if (m) {
+        gaugesHtml = '<div class="gauges-row">' +
+          renderArcGauge('CPU', m.cpuPct, 'ld ' + m.load1, '#00f0ff') +
+          renderArcGauge('RAM', m.ramPct, m.ramUsedGb + '/' + m.ramTotalGb + 'G', '#00ff9d') +
+          renderArcGauge('DISK', m.diskPct, m.diskFreeGb + 'G free', '#a77bff') +
+        '</div>';
+        if (m.gpu) {
+          const vramPct = m.gpu.vramTotalMiB > 0 ? Math.round((m.gpu.vramUsedMiB / m.gpu.vramTotalMiB) * 100) : 0;
+          gaugesHtml += '<div class="gauges-gpu-row">' +
+            renderArcGauge(m.gpu.name || 'GPU', m.gpu.utilPct, m.gpu.tempC + '°C · ' + m.gpu.powerW + 'W', '#ffb800') +
+            renderArcGauge('VRAM', vramPct, m.gpu.vramUsedMiB + 'M/' + Math.round(m.gpu.vramTotalMiB / 1024) + 'G', '#ff2a85') +
+          '</div>';
+        }
+        const hist = pushMetricHist(h.id, m.cpuPct, m.gpu ? m.gpu.utilPct : null);
+        gaugesHtml += renderSparkline(hist.cpu, hist.gpu);
+      }
+
+      const hostWorkers = (data.workers || []).filter((w) => w.host === h.id).slice(0, 4);
+      const owner = hostOwnerInfo(h, data.bots || []);
+      const workerHtml = hostWorkers.length
+        ? hostWorkers.map(renderWorkerSlot).join('')
+        : '<div class="hw-empty">STANDBY · NO ACTIVE WORKERS ON ' + escapeHtml(h.label) + '</div>';
+
+      return '<div class="host-pod ' + (h.activeWorkers > 0 ? 'active' : '') + '" data-host-pod="' + escapeHtml(h.id) + '">' +
+        '<span class="host-port-in"></span>' +
+        '<div class="host-hdr">' +
+          '<span class="host-name">' + escapeHtml(h.label) + '</span>' +
+          '<span class="pill ' + (h.online ? 'on' : 'off') + '">' + (h.online ? ('ONLINE · ' + h.activeWorkers + 'W') : 'OFFLINE') + '</span>' +
+        '</div>' +
+        '<div class="host-meta"><span>' + escapeHtml(h.specs) + '</span><span>' + escapeHtml(h.endpoint.replace(/^ws:\/\//, '')) + '</span></div>' +
+        '<div class="host-owner-line ' + owner.cls + '">' + escapeHtml(owner.text) + '</div>' +
+        gaugesHtml +
+        '<div class="host-workers">' +
+          '<div class="hw-hdr"><span>HOSTED WORKERS (' + hostWorkers.length + ')</span><span>CLICK → SESSION</span></div>' +
+          workerHtml +
+        '</div>' +
+      '</div>';
+    }).join('');
+
+    // Telemetry ticker
+    const eList = document.getElementById('eventList');
+    eList.innerHTML = (data.events || []).slice(0, 6).map((e) =>
+      '<div class="log-line"><span class="ts">[' + fmtTime(e.ts) + ']</span>' + escapeHtml(e.message) + '</div>'
+    ).join('');
+
+    applyHoverClasses();
+    resizeCanvas();
+  }
+
+  function showToast(msg) {
+    jumpToast.textContent = msg;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { jumpToast.textContent = ''; }, 3600);
+  }
+
+  function activeFocus() {
+    return pinned || hovered;
+  }
+
+  function sameFocus(a, b) {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    return a.kind === b.kind && a.id === b.id;
+  }
+
+  function updateConduitHighlights() {
+    const f = activeFocus();
+    const liveList = [];
+    for (const c of cachedConduits) {
+      let hi = false;
+      if (f) {
+        if (c.isWorker) {
+          hi = (f.kind === 'worker' && c.workerId === f.id) ||
+            (f.kind === 'bot' && c.botName === f.botName) ||
+            (f.kind === 'host' && c.hostId === f.hostId);
+        } else {
+          hi = (f.kind === 'bot' && c.botName === f.botName) ||
+            (f.kind === 'host' && c.hostId === f.hostId);
+        }
+      }
+      c.highlighted = hi;
+      if (c.kind === 'worker-live' || c.kind === 'bot-live' || hi) liveList.push(c);
+    }
+    cachedLiveConduits = liveList;
+  }
+
+  function updateInspectorForFocus(f) {
+    if (!f) {
+      inspectorText.innerHTML = '<b>[TIP]</b> 悬停或点击主机高亮归属链路 · 点击空白处或按 ESC 取消选中 · 点击 Bot/Worker 直达 Orca Session';
+      return;
+    }
+    const lockTag = pinned ? ' <span style="color:var(--emerald)">[已锁定·点空白取消]</span>' : '';
+    if (f.kind === 'worker') {
+      const w = snap?.workers?.find((x) => x.id === f.id);
+      const ag = formatAgentBadge(w?.agent);
+      inspectorText.innerHTML = '<b>[WORKER]</b> ' + escapeHtml(w?.title || f.id) +
+        ' · 模型 <b style="color:' + ag.color + '">' + escapeHtml(ag.label) + '</b>' +
+        ' · 运行于 <b>' + escapeHtml(hostShort(w?.host)) + '</b>' +
+        (w?.bot ? (' · 由 <b>' + escapeHtml(w.bot) + '</b> (@' + escapeHtml(snap?.controlHostLabel || 'CTRL') + ') 派发') : '') +
+        ' · 点击直达 Session' + lockTag;
+      return;
+    }
+    if (f.kind === 'bot') {
+      const b = snap?.bots?.find((x) => x.name === f.botName);
+      const ag = formatAgentBadge(b?.agent);
+      const targets = [hostShort(b?.primaryHost), b?.secondaryHost ? hostShort(b.secondaryHost) : null].filter(Boolean).join(' + ');
+      inspectorText.innerHTML = '<b>[BOT]</b> ' + escapeHtml(f.botName || '') +
+        ' · 引擎 <b style="color:' + ag.color + '">' + escapeHtml(ag.label) + '</b>' +
+        ' · 大脑驻留 <b>' + escapeHtml(hostShort(b?.botHost)) + '</b> → 算力路由 <b>' + escapeHtml(targets) + '</b>' +
+        (b?.activeSessionTitle ? (' · 当前: ' + escapeHtml(b.activeSessionTitle)) : '') + lockTag;
+      return;
+    }
+    if (f.kind === 'host') {
+      const h = snap?.hosts?.find((x) => x.id === f.hostId);
+      inspectorText.innerHTML = '<b>[HOST]</b> ' + escapeHtml(h?.label || f.hostId) +
+        ' (' + escapeHtml(h?.specs || '') + ') · ' + (h?.activeWorkers || 0) + ' 个活跃 Worker · ' + escapeHtml(h?.role || '') + lockTag;
+    }
+  }
+
+  function applyHoverClasses() {
+    const f = activeFocus();
+    const botEls = deckStage.querySelectorAll('.bot-node');
+    const workerEls = deckStage.querySelectorAll('.worker-slot');
+    const hostEls = deckStage.querySelectorAll('.host-pod');
+
+    updateInspectorForFocus(f);
+    updateConduitHighlights();
+
+    if (!f) {
+      botEls.forEach((el) => el.classList.remove('dim', 'hi'));
+      workerEls.forEach((el) => el.classList.remove('dim', 'hi'));
+      hostEls.forEach((el) => el.classList.remove('dim', 'hi'));
+      return;
+    }
+
+    botEls.forEach((el) => {
+      const bName = el.getAttribute('data-bot-name');
+      const bot = snap?.bots?.find((x) => x.name === bName);
+      const match =
+        (f.kind === 'bot' && bName === f.botName) ||
+        (f.kind === 'worker' && bName === f.botName) ||
+        (f.kind === 'host' && bot && (bot.primaryHost === f.hostId || bot.secondaryHost === f.hostId || bot.botHost === f.hostId));
+      el.classList.toggle('hi', Boolean(match));
+      el.classList.toggle('dim', !match);
+    });
+
+    workerEls.forEach((el) => {
+      const wId = el.getAttribute('data-worker-id');
+      const wBot = el.getAttribute('data-worker-bot');
+      const wHost = el.getAttribute('data-worker-host');
+      const match =
+        (f.kind === 'worker' && wId === f.id) ||
+        (f.kind === 'bot' && wBot === f.botName) ||
+        (f.kind === 'host' && wHost === f.hostId);
+      el.classList.toggle('hi', Boolean(match));
+      el.classList.toggle('dim', !match);
+    });
+
+    hostEls.forEach((el) => {
+      const hId = el.getAttribute('data-host-pod');
+      const bot = f.botName ? snap?.bots?.find((x) => x.name === f.botName) : null;
+      const match =
+        (f.kind === 'host' && hId === f.hostId) ||
+        (f.kind === 'worker' && hId === f.hostId) ||
+        (f.kind === 'bot' && bot && (bot.primaryHost === hId || bot.secondaryHost === hId || bot.botHost === hId));
+      el.classList.toggle('hi', Boolean(match));
+      el.classList.toggle('dim', !match);
+    });
+  }
+
+  function clearSelection() {
+    if (!pinned && !hovered) return;
+    pinned = null;
+    hovered = null;
+    applyHoverClasses();
+  }
+
+  function resolveTargetFocus(target) {
+    if (!target || !target.closest) return null;
+    const wEl = target.closest('.worker-slot');
+    if (wEl) {
+      const wId = wEl.getAttribute('data-worker-id');
+      const w = snap?.workers?.find((x) => x.id === wId);
+      return { kind: 'worker', id: wId, botName: w?.bot || '', hostId: w?.host || 'local' };
+    }
+    const bEl = target.closest('.bot-node');
+    if (bEl) {
+      const bName = bEl.getAttribute('data-bot-name');
+      const b = snap?.bots?.find((x) => x.name === bName);
+      return { kind: 'bot', id: b?.id || bName, botName: bName, hostId: b?.primaryHost || 'local' };
+    }
+    const hEl = target.closest('.host-pod');
+    if (hEl) {
+      const hId = hEl.getAttribute('data-host-pod');
+      return { kind: 'host', id: hId, hostId: hId };
+    }
+    return null;
+  }
+
+  // Hover delegation: clears hover immediately when pointer moves onto blank area
+  deckStage.addEventListener('mouseover', (ev) => {
+    const next = resolveTargetFocus(ev.target);
+    if (sameFocus(hovered, next)) return;
+    hovered = next;
+    if (!pinned) applyHoverClasses();
+  });
+
+  deckStage.addEventListener('mouseleave', () => {
+    if (!hovered) return;
+    hovered = null;
+    if (!pinned) applyHoverClasses();
+  });
+
+  // Global click handler: clicking any blank area cancels selection; clicking a Host toggles pin
+  document.addEventListener('click', async (ev) => {
+    const target = ev.target;
+    if (target && target.closest && target.closest('button')) return;
+
+    const wEl = target && target.closest ? target.closest('.worker-slot') : null;
+    if (wEl) {
+      const title = wEl.querySelector('.ws-title')?.textContent || 'worker';
+      const payload = {
+        workspaceId: wEl.getAttribute('data-ws') || null,
+        host: wEl.getAttribute('data-worker-host') || 'local',
+        workspacePath: wEl.getAttribute('data-wpath') || null,
+        terminalId: wEl.getAttribute('data-term') || null,
+        sessionId: wEl.getAttribute('data-session') || null,
+        fallbackWorkspaceId: wEl.getAttribute('data-fallback-ws') || null
+      };
+      showToast('JUMPING → ' + title.slice(0, 22) + '...');
+      try {
+        const res = await apiRequest('hq.openSession', payload);
+        showToast(res?.opened ? ('✓ ' + res.detail) : ('! ' + (res?.detail || 'No session')));
+      } catch {
+        showToast('! Session jump failed');
+      }
+      return;
+    }
+
+    const bEl = target && target.closest ? target.closest('.bot-node') : null;
+    if (bEl) {
+      const bName = bEl.getAttribute('data-bot-name') || 'Bot';
+      const ws = bEl.getAttribute('data-ws') || null;
+      const host = bEl.getAttribute('data-host') || 'local';
+      if (!ws) {
+        showToast('! ' + bName + ' 暂无可打开会话');
+        return;
+      }
+      showToast('OPENING → ' + bName + '...');
+      try {
+        const res = await apiRequest('hq.openSession', { workspaceId: ws, host });
+        showToast(res?.opened ? ('✓ ' + bName + ' Session') : '! Unable to open');
+      } catch {
+        showToast('! Failed to open Bot');
+      }
+      return;
+    }
+
+    const hEl = target && target.closest ? target.closest('.host-pod') : null;
+    if (hEl) {
+      const hId = hEl.getAttribute('data-host-pod');
+      const nextPin = { kind: 'host', id: hId, hostId: hId };
+      pinned = sameFocus(pinned, nextPin) ? null : nextPin;
+      if (!pinned) hovered = null;
+      applyHoverClasses();
+      return;
+    }
+
+    // Clicked blank space anywhere -> immediately deselect
+    clearSelection();
+  });
+
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') clearSelection();
+  });
+
+  // ZERO-REFLOW CACHED GEOMETRY + ZERO-SHADOWBLUR 60FPS RENDER ENGINE
+  function relPos(el, stageRect) {
+    const r = el.getBoundingClientRect();
+    return {
+      x: r.left - stageRect.left + r.width / 2,
+      y: r.top - stageRect.top + r.height / 2
+    };
+  }
+
+  function rebuildLayoutCache() {
+    const stageRect = deckStage.getBoundingClientRect();
+    const w = stageRect.width || 450;
+    const h = stageRect.height || 520;
+    const laneEl = deckStage.querySelector('.mesh-lane');
+    const lr = laneEl ? laneEl.getBoundingClientRect() : null;
+    const laneBox = lr ? {
+      left: lr.left - stageRect.left,
+      top: lr.top - stageRect.top,
+      width: lr.width,
+      height: lr.height,
+      bottom: lr.bottom - stageRect.top
+    } : null;
+    const br = brainBay.getBoundingClientRect();
+    const brainBox = br.width > 0 ? {
+      sx: br.left - stageRect.left + 2.5,
+      syTop: br.top - stageRect.top + 36,
+      syBot: br.bottom - stageRect.top - 10
+    } : null;
+
+    const cx = laneBox ? (laneBox.left + laneBox.width / 2) : w * 0.44;
+    const cy = laneBox ? (laneBox.top + laneBox.height / 2) : h * 0.52;
+    const maxR = Math.min(130, Math.max(36, (laneBox ? laneBox.width : 90) * 0.82));
+
+    const botPorts = new Map();
+    deckStage.querySelectorAll('.bot-node').forEach((el) => {
+      const port = el.querySelector('.port-out');
+      if (port) botPorts.set(el.getAttribute('data-bot-name'), relPos(port, stageRect));
+    });
+    const hostPorts = new Map();
+    deckStage.querySelectorAll('.host-pod').forEach((el) => {
+      const port = el.querySelector('.host-port-in');
+      if (port) hostPorts.set(el.getAttribute('data-host-pod'), relPos(port, stageRect));
+    });
+    const workerPorts = new Map();
+    deckStage.querySelectorAll('.worker-slot').forEach((el) => {
+      const port = el.querySelector('.w-port-in');
+      if (port) workerPorts.set(el.getAttribute('data-worker-id'), relPos(port, stageRect));
+    });
+
+    cachedLayout = { w, h, cx, cy, maxR, laneBox, brainBox };
+
+    // Build and pre-sort conduits once per layout/data update
+    const conduits = [];
+    if (snap) {
+      const liveWorkerBots = new Set(
+        (snap.workers || []).filter((wk) => wk.state === 'working' && wk.bot).map((wk) => wk.bot)
+      );
+      for (const b of snap.bots || []) {
+        const src = botPorts.get(b.name);
+        if (!src) continue;
+        const targets = [b.primaryHost, b.secondaryHost].filter(Boolean);
+        const hasLiveWorker = liveWorkerBots.has(b.name);
+        for (const tHost of targets) {
+          const dst = hostPorts.get(tHost);
+          if (!dst) continue;
+          const isBotLive = b.state === 'working' && !hasLiveWorker && tHost === (b.botHost || 'local');
+          const dx = Math.max(36, Math.abs(dst.x - src.x) * 0.52);
+          conduits.push({
+            src, dst,
+            c1x: src.x + dx, c1y: src.y, c2x: dst.x - dx, c2y: dst.y,
+            color: isBotLive ? '#ff2a85' : squadColor(b.squad),
+            kind: isBotLive ? 'bot-live' : 'standby',
+            isWorker: false,
+            workerId: null,
+            highlighted: false,
+            botName: b.name,
+            hostId: tHost
+          });
+        }
+      }
+      for (const wk of snap.workers || []) {
+        const dst = workerPorts.get(wk.id) || hostPorts.get(wk.host);
+        if (!dst) continue;
+        const botName = wk.bot || (snap.bots.find((b) => b.squad === wk.squad)?.name) || (snap.bots[0]?.name || '');
+        const src = botPorts.get(botName) || botPorts.values().next().value;
+        if (!src) continue;
+        const isWorking = wk.state === 'working';
+        const dx = Math.max(36, Math.abs(dst.x - src.x) * 0.52);
+        conduits.push({
+          src, dst,
+          c1x: src.x + dx, c1y: src.y, c2x: dst.x - dx, c2y: dst.y,
+          color: isWorking ? '#ff2a85' : wk.state === 'succeeded' ? '#00ff9d' : squadColor(wk.squad),
+          kind: isWorking ? 'worker-live' : 'worker-recent',
+          isWorker: true,
+          workerId: wk.id,
+          highlighted: false,
+          botName,
+          hostId: wk.host
+        });
+      }
+    }
+
+    const layerOrder = { standby: 0, 'worker-recent': 1, 'bot-live': 2, 'worker-live': 3 };
+    conduits.sort((a, b) => (layerOrder[a.kind] || 0) - (layerOrder[b.kind] || 0));
+    cachedConduits = conduits;
+    cachedRecentConduits = conduits.filter((c) => c.kind === 'worker-recent');
+    cachedStandbyConduits = conduits.filter((c) => c.kind === 'standby');
+    updateConduitHighlights();
+  }
+
+  function resizeCanvas() {
+    const rect = deckStage.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    canvas.width = Math.max(320, Math.floor(rect.width * dpr));
+    canvas.height = Math.max(420, Math.floor(rect.height * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    rebuildLayoutCache();
+  }
+  window.addEventListener('resize', resizeCanvas);
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(() => resizeCanvas()).observe(deckStage);
+  }
+  resizeCanvas();
+
+  function cubicPointFast(c, t) {
+    const it = 1 - t;
+    const it2 = it * it, t2 = t * t;
+    return {
+      x: it2 * it * c.src.x + 3 * it2 * t * c.c1x + 3 * it * t2 * c.c2x + t2 * t * c.dst.x,
+      y: it2 * it * c.src.y + 3 * it2 * t * c.c1y + 3 * it * t2 * c.c2y + t2 * t * c.dst.y
+    };
+  }
+
+  function drawFrame() {
+    if (document.hidden) {
+      rafId = 0;
+      return;
+    }
+    if (!cachedLayout) rebuildLayoutCache();
+    const { w, h, cx, cy, maxR, laneBox, brainBox } = cachedLayout;
+    ctx.clearRect(0, 0, w, h);
+
+    sweepAngle = (sweepAngle + 0.022) % (Math.PI * 2);
+    ringAngle = (ringAngle - 0.007) % (Math.PI * 2);
+    wavePhase += 0.08;
+
+    // 0. Floating Cyber Data-Motes (zero shadowBlur)
+    if (laneBox) {
+      for (let i = 0; i < motes.length; i++) {
+        const m = motes[i];
+        m.ry += m.vy;
+        if (m.ry < 0) m.ry = 1;
+        ctx.globalAlpha = 0.26 + 0.16 * Math.sin(wavePhase + m.rx * 12);
+        ctx.fillStyle = m.col;
+        ctx.beginPath();
+        ctx.arc(laneBox.left + m.rx * laneBox.width, laneBox.top + m.ry * laneBox.height, m.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // 0.5 Intra-Brain Command Spine along Left Edge (zero shadowBlur)
+    if (brainBox && brainBox.syBot > brainBox.syTop + 20) {
+      ctx.beginPath();
+      ctx.moveTo(brainBox.sx, brainBox.syTop);
+      ctx.lineTo(brainBox.sx, brainBox.syBot);
+      ctx.strokeStyle = 'rgba(0, 240, 255, 0.42)';
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      const sparkY = brainBox.syTop + ((wavePhase * 0.09) % 1) * (brainBox.syBot - brainBox.syTop);
+      ctx.beginPath();
+      ctx.arc(brainBox.sx, sparkY, 5.5, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0, 240, 255, 0.22)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(brainBox.sx, sparkY, 2.3, 0, Math.PI * 2);
+      ctx.fillStyle = '#00f0ff';
+      ctx.fill();
+    }
+
+    // 1. Holographic Counter-Rotating Cyber Radar
+    for (let i = 1; i <= 3; i++) {
+      const r = (maxR / 3) * i;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.strokeStyle = i === 3 ? 'rgba(0, 240, 255, 0.16)' : 'rgba(0, 240, 255, 0.10)';
+      ctx.lineWidth = 1;
+      if (i === 2) ctx.setLineDash([4, 5]);
+      else ctx.setLineDash([]);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(ringAngle);
+    ctx.beginPath();
+    for (let k = 0; k < 12; k++) {
+      const a = (k / 12) * Math.PI * 2;
+      const ca = Math.cos(a), sa = Math.sin(a);
+      ctx.moveTo(ca * (maxR - 5), sa * (maxR - 5));
+      ctx.lineTo(ca * (maxR + 3), sa * (maxR + 3));
+    }
+    ctx.strokeStyle = 'rgba(0, 240, 255, 0.22)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+
+    const grad = ctx.createRadialGradient(cx, cy, 2, cx, cy, maxR);
+    grad.addColorStop(0, 'rgba(0, 240, 255, 0.24)');
+    grad.addColorStop(0.65, 'rgba(0, 240, 255, 0.08)');
+    grad.addColorStop(1, 'rgba(0, 240, 255, 0)');
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, maxR, sweepAngle - 0.65, sweepAngle);
+    ctx.closePath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Central core halo (dual circle, zero shadowBlur)
+    ctx.beginPath();
+    ctx.arc(cx, cy, 9, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0, 240, 255, 0.20)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx, cy, 3.8, 0, Math.PI * 2);
+    ctx.fillStyle = '#00f0ff';
+    ctx.fill();
+
+    // 2. Dual-Pass Neon Conduits (10x faster than shadowBlur)
+    const hasFocus = Boolean(activeFocus());
+    for (let i = 0; i < cachedConduits.length; i++) {
+      const c = cachedConduits[i];
+      const isLive = c.kind === 'worker-live' || c.kind === 'bot-live';
+      const dimmed = hasFocus && !c.highlighted;
+      let alpha = c.kind === 'standby' ? 0.14 : c.kind === 'worker-recent' ? 0.42 : 0.88;
+      if (c.highlighted) alpha = 0.96;
+      else if (dimmed) alpha = 0.05;
+
+      const lw = c.highlighted ? 2.3 : isLive ? 2.0 : c.kind === 'worker-recent' ? 1.35 : 0.9;
+      ctx.beginPath();
+      ctx.moveTo(c.src.x, c.src.y);
+      ctx.bezierCurveTo(c.c1x, c.c1y, c.c2x, c.c2y, c.dst.x, c.dst.y);
+
+      // Soft outer neon bloom pass (no Gaussian shadowBlur!)
+      if ((isLive || c.highlighted) && !dimmed) {
+        ctx.setLineDash([]);
+        ctx.strokeStyle = c.color;
+        ctx.globalAlpha = c.highlighted ? 0.24 : 0.18;
+        ctx.lineWidth = lw * 3.4;
+        ctx.stroke();
+      }
+
+      if (c.kind === 'standby' && !c.highlighted) ctx.setLineDash([3, 4]);
+      else ctx.setLineDash([]);
+      ctx.strokeStyle = c.color;
+      ctx.globalAlpha = alpha;
+      ctx.lineWidth = lw;
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+
+    // 3. Spawn & Animate Neon Comet Packets (zero shadowBlur)
+    if (cachedLiveConduits.length && Math.random() < 0.22) {
+      const pick = cachedLiveConduits[Math.floor(Math.random() * cachedLiveConduits.length)];
+      packets.push({ conduit: pick, t: 0, speed: 0.019 + Math.random() * 0.010, color: pick.color, hot: true });
+    } else if (cachedRecentConduits.length && Math.random() < 0.06) {
+      const pick = cachedRecentConduits[Math.floor(Math.random() * cachedRecentConduits.length)];
+      packets.push({ conduit: pick, t: 0, speed: 0.012 + Math.random() * 0.005, color: pick.color, hot: false });
+    } else if (cachedStandbyConduits.length && Math.random() < 0.03) {
+      const pick = cachedStandbyConduits[Math.floor(Math.random() * cachedStandbyConduits.length)];
+      packets.push({ conduit: pick, t: 0, speed: 0.009, color: '#00f0ff', hot: false });
+    }
+    if (packets.length > 36) packets.shift();
+
+    for (let i = packets.length - 1; i >= 0; i--) {
+      const p = packets[i];
+      p.t += p.speed;
+      if (p.t >= 1) {
+        if (p.hot) ripples.push({ x: p.conduit.dst.x, y: p.conduit.dst.y, r: 2.5, maxR: 15, alpha: 0.82, color: p.color });
+        packets.splice(i, 1);
+        continue;
+      }
+      for (let k = 3; k >= 1; k--) {
+        const pt = cubicPointFast(p.conduit, Math.max(0, p.t - k * 0.025));
+        ctx.globalAlpha = (p.hot ? 0.50 : 0.25) * (1 - k * 0.25);
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, (p.hot ? 2.6 : 1.7) * (1 - k * 0.22), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      const head = cubicPointFast(p.conduit, p.t);
+      if (p.hot) {
+        ctx.globalAlpha = 0.28;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(head.x, head.y, 7.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = p.hot ? '#ffffff' : p.color;
+      ctx.beginPath();
+      ctx.arc(head.x, head.y, p.hot ? 3.1 : 2.1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 4. Arrival Shockwave Ripples
+    for (let i = ripples.length - 1; i >= 0; i--) {
+      const rp = ripples[i];
+      rp.r += 0.55;
+      rp.alpha -= 0.04;
+      if (rp.alpha <= 0 || rp.r >= rp.maxR) {
+        ripples.splice(i, 1);
+        continue;
+      }
+      ctx.globalAlpha = rp.alpha;
+      ctx.strokeStyle = rp.color;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.arc(rp.x, rp.y, rp.r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // 5. Live Telemetry Oscilloscope Heartbeat Wave (zero shadowBlur)
+    if (laneBox && laneBox.width > 50) {
+      const ow = Math.min(200, laneBox.width - 16);
+      const ox = cx - ow / 2;
+      const oy = laneBox.bottom - 42;
+      const activeAmp = 3.5 + Math.min(8, (snap?.summary?.activeWorkers || 0) * 3.2);
+      const col = (snap?.summary?.activeWorkers || 0) > 0 ? '#ff2a85' : '#00f0ff';
+      ctx.beginPath();
+      for (let i = 0; i <= 36; i++) {
+        const frac = i / 36;
+        const env = Math.sin(frac * Math.PI);
+        const py = oy + Math.sin(i * 0.58 - wavePhase * 1.4) * activeAmp * env +
+          Math.cos(i * 1.3 + wavePhase * 2.1) * (activeAmp * 0.35) * env;
+        if (i === 0) ctx.moveTo(ox + frac * ow, py);
+        else ctx.lineTo(ox + frac * ow, py);
+      }
+      ctx.strokeStyle = col;
+      ctx.globalAlpha = 0.22;
+      ctx.lineWidth = 4;
+      ctx.stroke();
+      ctx.globalAlpha = 0.72;
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    rafId = requestAnimationFrame(drawFrame);
+  }
+
+  function startLoop() {
+    if (!rafId && !document.hidden) rafId = requestAnimationFrame(drawFrame);
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      rebuildLayoutCache();
+      startLoop();
+    }
+  });
+  startLoop();
+
+  // =========================================================================
+  // ONE-CLICK 1920x1080 CINEMA SHOWCASE VIDEO EXPORTER (REAL LIVE DATA)
+  // =========================================================================
+  function pickRecorderMime() {
+    if (typeof MediaRecorder === 'undefined') return null;
+    const candidates = [
+      'video/mp4;codecs=avc1.42E01E',
+      'video/mp4;codecs=avc1',
+      'video/mp4',
+      'video/webm;codecs=vp9',
+      'video/webm;codecs=vp8',
+      'video/webm'
+    ];
+    for (const m of candidates) {
+      if (MediaRecorder.isTypeSupported(m)) return m;
+    }
+    return '';
+  }
+
+  function roundRect(c, x, y, w, h, r) {
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r);
+    c.closePath();
+  }
+
+  function drawCinemaGauge(c, cx, cy, r, label, pct, sub, accent, introEase) {
+    const val = Math.max(0, Math.min(100, (pct || 0) * introEase));
+    const col = gaugeColor(pct || 0, accent);
+    const startA = (150 * Math.PI) / 180;
+    const totalA = (240 * Math.PI) / 180;
+
+    c.save();
+    c.lineCap = 'round';
+    c.lineWidth = 7.5;
+    c.beginPath();
+    c.arc(cx, cy, r, startA, startA + totalA);
+    c.strokeStyle = 'rgba(120, 144, 178, 0.22)';
+    c.stroke();
+
+    c.beginPath();
+    c.arc(cx, cy, r, startA, startA + totalA * (val / 100));
+    c.strokeStyle = col;
+    c.shadowColor = col;
+    c.shadowBlur = 12;
+    c.stroke();
+
+    c.shadowBlur = 0;
+    c.fillStyle = '#f2f9ff';
+    c.font = 'bold 17px ui-monospace, Menlo, monospace';
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.fillText(Math.round(val) + '%', cx, cy + 2);
+
+    c.fillStyle = col;
+    c.font = 'bold 11.5px ui-monospace, Menlo, monospace';
+    c.fillText(label, cx, cy + r + 13);
+
+    c.fillStyle = '#8aa8cd';
+    c.font = '10.5px ui-monospace, Menlo, monospace';
+    c.fillText(sub.slice(0, 18), cx, cy + r + 27);
+    c.restore();
+  }
+
+  function truncText(s, maxLen) {
+    const str = String(s || '');
+    return str.length > maxLen ? str.slice(0, maxLen - 1) + '…' : str;
+  }
+
+  async function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Failed to read recorded blob'));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function exportCinemaVideo() {
+    if (isRecording || !snap) return;
+    const mimeType = pickRecorderMime();
+    if (mimeType === null) {
+      showToast('! MediaRecorder unavailable');
+      return;
+    }
+
+    isRecording = true;
+    recBtn.disabled = true;
+    recBtn.classList.add('recording');
+
+    const W = 1920, H = 1080;
+    const DURATION_MS = 8000;
+    const FPS = 30;
+    const off = document.createElement('canvas');
+    off.width = W;
+    off.height = H;
+    const c = off.getContext('2d');
+
+    const data = JSON.parse(JSON.stringify(snap));
+    const orderedBots = orderBotGroups(data.bots || []).flatMap((g) => g.bots);
+    const sortedHosts = sortHostsForDeck(data.hosts || []);
+
+    // Precompute 1920x1080 Cinema Layout Coordinates
+    const botBoxes = new Map();
+    const botLeftX = 56, botW = 430;
+    let curY = 172;
+    const squadBreaks = new Set();
+    let prevSquad = null;
+    const botH = Math.min(58, Math.floor((820 - orderedBots.length * 6) / Math.max(1, orderedBots.length)));
+    for (const b of orderedBots) {
+      if (prevSquad && prevSquad !== b.squad) {
+        squadBreaks.add(curY + 4);
+        curY += 20;
+      }
+      prevSquad = b.squad;
+      botBoxes.set(b.name, {
+        bot: b, x: botLeftX, y: curY, w: botW, h: botH,
+        portOut: { x: botLeftX + botW, y: curY + botH / 2 }
+      });
+      curY += botH + 7;
+    }
+
+    const hostBoxes = new Map();
+    const workerBoxes = new Map();
+    const hostX = 1130, hostW = 736;
+    const podGap = 16;
+    const podHeights = sortedHosts.map((h) => (h.metrics?.gpu ? 324 : 268));
+    let hy = 128;
+    sortedHosts.forEach((h, idx) => {
+      const ph = podHeights[idx] || 268;
+      const hWorkers = (data.workers || []).filter((w) => w.host === h.id).slice(0, 3);
+      hostBoxes.set(h.id, {
+        host: h, x: hostX, y: hy, w: hostW, h: ph,
+        portIn: { x: hostX, y: hy + 40 },
+        workers: hWorkers
+      });
+      const wStartY = hy + (h.metrics?.gpu ? 194 : 158);
+      const wSlotH = 38;
+      hWorkers.forEach((wk, wi) => {
+        const wy = wStartY + wi * (wSlotH + 5);
+        workerBoxes.set(wk.id, {
+          worker: wk, x: hostX + 14, y: wy, w: hostW - 28, h: wSlotH,
+          portIn: { x: hostX, y: wy + wSlotH / 2 }
+        });
+      });
+      hy += ph + podGap;
+    });
+
+    // Build Cinema Conduits
+    const cinemaConduits = [];
+    const liveWorkerBots = new Set((data.workers || []).filter((w) => w.state === 'working' && w.bot).map((w) => w.bot));
+    for (const b of orderedBots) {
+      const sb = botBoxes.get(b.name);
+      if (!sb) continue;
+      for (const th of [b.primaryHost, b.secondaryHost].filter(Boolean)) {
+        const hb = hostBoxes.get(th);
+        if (!hb) continue;
+        const isBotLive = b.state === 'working' && !liveWorkerBots.has(b.name) && th === (b.botHost || 'local');
+        cinemaConduits.push({
+          src: sb.portOut, dst: hb.portIn,
+          color: isBotLive ? '#ff2a85' : squadColor(b.squad),
+          kind: isBotLive ? 'bot-live' : 'standby'
+        });
+      }
+    }
+    for (const w of data.workers || []) {
+      const wb = workerBoxes.get(w.id);
+      const hb = hostBoxes.get(w.host);
+      const dst = wb ? wb.portIn : hb?.portIn;
+      const botName = w.bot || (data.bots.find((b) => b.squad === w.squad)?.name) || (data.bots[0]?.name || '');
+      const sb = botBoxes.get(botName);
+      if (!sb || !dst) continue;
+      cinemaConduits.push({
+        src: sb.portOut, dst,
+        color: w.state === 'working' ? '#ff2a85' : w.state === 'succeeded' ? '#00ff9d' : squadColor(w.squad),
+        kind: w.state === 'working' ? 'worker-live' : 'worker-recent'
+      });
+    }
+
+    const cinPackets = [];
+    const cinRipples = [];
+    const cinMotes = Array.from({ length: 48 }, (_, i) => ({
+      x: 500 + ((i * 73) % 610),
+      y: 120 + ((i * 119) % 860),
+      vy: -0.55 - (i % 4) * 0.35,
+      r: 1.2 + (i % 3) * 0.9,
+      col: i % 3 === 0 ? '#00f0ff' : i % 3 === 1 ? '#ff2a85' : '#a77bff'
+    }));
+
+    const stream = off.captureStream(FPS);
+    const chunks = [];
+    const recorder = new MediaRecorder(stream, {
+      ...(mimeType ? { mimeType } : {}),
+      videoBitsPerSecond: 8000000
+    });
+    recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+
+    const donePromise = new Promise((resolve) => {
+      recorder.onstop = () => resolve(new Blob(chunks, { type: recorder.mimeType || mimeType || 'video/webm' }));
+    });
+
+    recorder.start(250);
+    const startMs = performance.now();
+    let frameIdx = 0;
+
+    function drawCinemaFrame(now) {
+      const elapsed = now - startMs;
+      const progress = Math.min(1, elapsed / DURATION_MS);
+      const remSec = Math.max(0, Math.ceil((DURATION_MS - elapsed) / 1000));
+      recBtn.textContent = '● REC ' + remSec + 's';
+
+      const introEase = 1 - Math.pow(1 - Math.min(1, elapsed / 1100), 3);
+      const tSec = elapsed / 1000;
+
+      // Background nebula + cyber grid
+      const bg = c.createLinearGradient(0, 0, 0, H);
+      bg.addColorStop(0, '#02060f');
+      bg.addColorStop(1, '#071024');
+      c.fillStyle = bg;
+      c.fillRect(0, 0, W, H);
+
+      const glow1 = c.createRadialGradient(340, 180, 10, 340, 180, 560);
+      glow1.addColorStop(0, 'rgba(0, 240, 255, 0.14)');
+      glow1.addColorStop(1, 'rgba(0, 240, 255, 0)');
+      c.fillStyle = glow1;
+      c.fillRect(0, 0, W, H);
+
+      const glow2 = c.createRadialGradient(1560, 420, 10, 1560, 420, 620);
+      glow2.addColorStop(0, 'rgba(255, 42, 133, 0.13)');
+      glow2.addColorStop(1, 'rgba(255, 42, 133, 0)');
+      c.fillStyle = glow2;
+      c.fillRect(0, 0, W, H);
+
+      // Subtle cyber grid
+      c.strokeStyle = 'rgba(0, 240, 255, 0.04)';
+      c.lineWidth = 1;
+      for (let gx = 0; gx < W; gx += 40) {
+        c.beginPath(); c.moveTo(gx, 0); c.lineTo(gx, H); c.stroke();
+      }
+      for (let gy = 0; gy < H; gy += 40) {
+        c.beginPath(); c.moveTo(0, gy); c.lineTo(W, gy); c.stroke();
+      }
+
+      // Top Cinema Command Header
+      roundRect(c, 36, 26, W - 72, 76, 12);
+      c.fillStyle = 'rgba(8, 16, 34, 0.92)';
+      c.fill();
+      c.strokeStyle = 'rgba(0, 240, 255, 0.34)';
+      c.lineWidth = 1.5;
+      c.stroke();
+
+      c.save();
+      c.beginPath();
+      c.arc(70, 64, 8, 0, Math.PI * 2);
+      c.fillStyle = '#00f0ff';
+      c.shadowColor = '#00f0ff';
+      c.shadowBlur = 18;
+      c.fill();
+      c.restore();
+
+      c.fillStyle = '#00f0ff';
+      c.font = 'bold 24px ui-monospace, Menlo, monospace';
+      c.textAlign = 'left';
+      c.fillText('CYBER HQ // ALL-IN-ONE FLEET COMMAND WALL', 94, 59);
+      c.fillStyle = '#7b95b8';
+      c.font = '13px ui-monospace, Menlo, monospace';
+      const ctrlLbl = data.controlHostLabel || 'CONTROL';
+      c.fillText('LIVE MULTI-HOST TOPOLOGY · BOT BRAINS (@' + ctrlLbl + ') → ORCA MESH → COMPUTE MACHINES & WORKERS', 94, 83);
+
+      // Right KPI chips + REC timecode
+      const recBlink = Math.floor(tSec * 2) % 2 === 0;
+      const kpis = [
+        { l: 'BOTS', v: data.summary.workingBots + '/' + data.summary.totalBots, col: '#00f0ff' },
+        { l: 'NODES', v: data.summary.onlineHosts + '/' + data.hosts.length, col: '#00ff9d' },
+        { l: 'ACTIVE', v: String(data.summary.activeWorkers), col: '#ff2a85' }
+      ];
+      let kx = 1320;
+      for (const kp of kpis) {
+        roundRect(c, kx, 42, 126, 44, 8);
+        c.fillStyle = 'rgba(11, 22, 46, 0.95)';
+        c.fill();
+        c.strokeStyle = 'rgba(0, 240, 255, 0.25)';
+        c.stroke();
+        c.fillStyle = '#7b95b8';
+        c.font = '11px ui-monospace, Menlo, monospace';
+        c.fillText(kp.l, kx + 12, 60);
+        c.fillStyle = kp.col;
+        c.font = 'bold 18px ui-monospace, Menlo, monospace';
+        c.fillText(kp.v, kx + 12, 79);
+        kx += 138;
+      }
+      // REC timecode badge
+      roundRect(c, 1742, 42, 124, 44, 8);
+      c.fillStyle = 'rgba(255, 42, 133, 0.16)';
+      c.fill();
+      c.strokeStyle = '#ff2a85';
+      c.stroke();
+      c.beginPath();
+      c.arc(1760, 64, 5, 0, Math.PI * 2);
+      c.fillStyle = recBlink ? '#ff2a85' : 'rgba(255, 42, 133, 0.3)';
+      c.fill();
+      c.fillStyle = '#fff';
+      c.font = 'bold 14px ui-monospace, Menlo, monospace';
+      c.fillText('00:0' + Math.min(8, Math.floor(tSec)) + '.' + Math.floor((tSec % 1) * 10), 1774, 69);
+
+      // Center Arena: Motes + Triple Counter-Rotating Holographic Radar + Oscilloscope
+      const rcx = 810, rcy = 510, rMax = 215;
+      for (const m of cinMotes) {
+        m.y += m.vy;
+        if (m.y < 120) m.y = 980;
+        c.save();
+        c.beginPath();
+        c.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+        c.fillStyle = m.col;
+        c.globalAlpha = 0.35 + 0.2 * Math.sin(tSec * 3 + m.x);
+        c.fill();
+        c.restore();
+      }
+
+      c.save();
+      for (let i = 1; i <= 4; i++) {
+        const rr = (rMax / 4) * i;
+        c.beginPath();
+        c.arc(rcx, rcy, rr, 0, Math.PI * 2);
+        c.strokeStyle = i === 4 ? 'rgba(0, 240, 255, 0.24)' : 'rgba(0, 240, 255, 0.11)';
+        c.lineWidth = 1.4;
+        if (i === 2 || i === 3) c.setLineDash([7, 8]);
+        else c.setLineDash([]);
+        c.stroke();
+      }
+      c.setLineDash([]);
+      c.save();
+      c.translate(rcx, rcy);
+      c.rotate(-tSec * 0.45);
+      for (let k = 0; k < 24; k++) {
+        const a = (k / 24) * Math.PI * 2;
+        c.beginPath();
+        c.moveTo(Math.cos(a) * (rMax - 8), Math.sin(a) * (rMax - 8));
+        c.lineTo(Math.cos(a) * (rMax + 6), Math.sin(a) * (rMax + 6));
+        c.strokeStyle = k % 2 === 0 ? 'rgba(0, 240, 255, 0.4)' : 'rgba(0, 240, 255, 0.18)';
+        c.lineWidth = k % 2 === 0 ? 2 : 1;
+        c.stroke();
+      }
+      c.restore();
+
+      const swA = (tSec * 1.45) % (Math.PI * 2);
+      const rg = c.createRadialGradient(rcx, rcy, 4, rcx, rcy, rMax);
+      rg.addColorStop(0, 'rgba(0, 240, 255, 0.30)');
+      rg.addColorStop(0.65, 'rgba(0, 240, 255, 0.10)');
+      rg.addColorStop(1, 'rgba(0, 240, 255, 0)');
+      c.beginPath();
+      c.moveTo(rcx, rcy);
+      c.arc(rcx, rcy, rMax, swA - 0.72, swA);
+      c.closePath();
+      c.fillStyle = rg;
+      c.fill();
+
+      c.beginPath();
+      c.arc(rcx, rcy, 7, 0, Math.PI * 2);
+      c.fillStyle = '#00f0ff';
+      c.shadowColor = '#00f0ff';
+      c.shadowBlur = 18;
+      c.fill();
+      c.restore();
+
+      // Tailscale Mesh Label & Live Oscilloscope
+      roundRect(c, rcx - 98, 128, 196, 28, 14);
+      c.fillStyle = 'rgba(5, 13, 30, 0.85)';
+      c.fill();
+      c.strokeStyle = 'rgba(0, 240, 255, 0.38)';
+      c.stroke();
+      c.fillStyle = '#00f0ff';
+      c.font = 'bold 12px ui-monospace, Menlo, monospace';
+      c.textAlign = 'center';
+      c.fillText('TAILSCALE WARP MESH', rcx, 146);
+
+      // Oscilloscope wave
+      const ow = 360, ox = rcx - ow / 2, oy = 930;
+      const amp = 12 + Math.min(18, (data.summary.activeWorkers || 0) * 6);
+      c.save();
+      c.beginPath();
+      for (let i = 0; i <= 72; i++) {
+        const px = ox + (i / 72) * ow;
+        const env = Math.sin((i / 72) * Math.PI);
+        const py = oy + Math.sin(i * 0.45 - tSec * 7) * amp * env + Math.cos(i * 1.1 + tSec * 11) * amp * 0.35 * env;
+        if (i === 0) c.moveTo(px, py);
+        else c.lineTo(px, py);
+      }
+      c.strokeStyle = (data.summary.activeWorkers || 0) > 0 ? '#ff2a85' : '#00f0ff';
+      c.lineWidth = 2.2;
+      c.shadowColor = c.strokeStyle;
+      c.shadowBlur = 12;
+      c.stroke();
+      c.restore();
+
+      // Draw Conduits
+      const orderMap = { standby: 0, 'worker-recent': 1, 'bot-live': 2, 'worker-live': 3 };
+      const sortedC = [...cinemaConduits].sort((a, b) => (orderMap[a.kind] || 0) - (orderMap[b.kind] || 0));
+      for (const cd of sortedC) {
+        const isLive = cd.kind === 'worker-live' || cd.kind === 'bot-live';
+        const dx = Math.max(120, Math.abs(cd.dst.x - cd.src.x) * 0.48);
+        c.save();
+        c.beginPath();
+        c.moveTo(cd.src.x, cd.src.y);
+        c.bezierCurveTo(cd.src.x + dx, cd.src.y, cd.dst.x - dx, cd.dst.y, cd.dst.x, cd.dst.y);
+        c.strokeStyle = cd.color;
+        c.globalAlpha = cd.kind === 'standby' ? 0.16 : cd.kind === 'worker-recent' ? 0.46 : 0.92;
+        c.lineWidth = isLive ? 3.2 : cd.kind === 'worker-recent' ? 2.0 : 1.2;
+        if (isLive) { c.shadowColor = cd.color; c.shadowBlur = 16; }
+        if (cd.kind === 'standby') c.setLineDash([5, 7]);
+        c.stroke();
+        c.restore();
+      }
+
+      // Cinema Packets + Comet Trails + Ripples
+      const liveC = sortedC.filter((x) => x.kind === 'worker-live' || x.kind === 'bot-live');
+      const recC = sortedC.filter((x) => x.kind === 'worker-recent');
+      if (liveC.length && frameIdx % 4 === 0) {
+        const pick = liveC[(frameIdx / 4) % liveC.length | 0];
+        cinPackets.push({ src: pick.src, dst: pick.dst, t: 0, speed: 0.024, color: pick.color, hot: true });
+      }
+      if (recC.length && frameIdx % 14 === 0) {
+        const pick = recC[(frameIdx / 14) % recC.length | 0];
+        cinPackets.push({ src: pick.src, dst: pick.dst, t: 0, speed: 0.016, color: pick.color, hot: false });
+      }
+      for (let i = cinPackets.length - 1; i >= 0; i--) {
+        const p = cinPackets[i];
+        p.t += p.speed;
+        if (p.t >= 1) {
+          if (p.hot) cinRipples.push({ x: p.dst.x, y: p.dst.y, r: 4, maxR: 28, alpha: 0.9, color: p.color });
+          cinPackets.splice(i, 1);
+          continue;
+        }
+        const ptAt = (tt) => {
+          const dx = Math.max(120, Math.abs(p.dst.x - p.src.x) * 0.48);
+          const c1x = p.src.x + dx, c1y = p.src.y, c2x = p.dst.x - dx, c2y = p.dst.y;
+          const it = 1 - tt;
+          return {
+            x: it*it*it*p.src.x + 3*it*it*tt*c1x + 3*it*tt*tt*c2x + tt*tt*tt*p.dst.x,
+            y: it*it*it*p.src.y + 3*it*it*tt*c1y + 3*it*tt*tt*c2y + tt*tt*tt*p.dst.y
+          };
+        };
+        for (let k = 4; k >= 1; k--) {
+          const tp = ptAt(Math.max(0, p.t - k * 0.022));
+          c.save();
+          c.beginPath();
+          c.arc(tp.x, tp.y, (p.hot ? 4.5 : 2.8) * (1 - k * 0.18), 0, Math.PI * 2);
+          c.fillStyle = p.color;
+          c.globalAlpha = (p.hot ? 0.6 : 0.35) * (1 - k * 0.2);
+          c.fill();
+          c.restore();
+        }
+        const hd = ptAt(p.t);
+        c.save();
+        c.beginPath();
+        c.arc(hd.x, hd.y, p.hot ? 5.5 : 3.2, 0, Math.PI * 2);
+        c.fillStyle = p.hot ? '#ffffff' : p.color;
+        c.shadowColor = p.color;
+        c.shadowBlur = p.hot ? 20 : 10;
+        c.fill();
+        c.restore();
+      }
+      for (let i = cinRipples.length - 1; i >= 0; i--) {
+        const rp = cinRipples[i];
+        rp.r += 1.1; rp.alpha -= 0.04;
+        if (rp.alpha <= 0 || rp.r >= rp.maxR) { cinRipples.splice(i, 1); continue; }
+        c.save();
+        c.beginPath();
+        c.arc(rp.x, rp.y, rp.r, 0, Math.PI * 2);
+        c.strokeStyle = rp.color;
+        c.globalAlpha = rp.alpha;
+        c.lineWidth = 2.2;
+        c.stroke();
+        c.restore();
+      }
+
+      // Left Bay Frame: BOT BRAINS @CONTROL PLANE
+      roundRect(c, 36, 122, 470, 868, 12);
+      c.fillStyle = 'rgba(6, 12, 26, 0.88)';
+      c.fill();
+      c.strokeStyle = 'rgba(0, 240, 255, 0.30)';
+      c.lineWidth = 1.5;
+      c.stroke();
+
+      roundRect(c, 50, 134, 442, 28, 6);
+      c.fillStyle = 'rgba(0, 240, 255, 0.11)';
+      c.fill();
+      c.fillStyle = '#00f0ff';
+      c.font = 'bold 12px ui-monospace, Menlo, monospace';
+      c.textAlign = 'left';
+      c.fillText('BOT BRAINS · HOSTED ON @' + (data.controlHostLabel || 'LOCAL') + ' (' + orderedBots.length + ' BOTS)', 62, 152);
+
+      // Vertical Command Spine + moving spark
+      c.save();
+      c.beginPath(); c.moveTo(46, 178); c.lineTo(46, 974);
+      c.strokeStyle = 'rgba(0, 240, 255, 0.45)';
+      c.lineWidth = 2.2;
+      c.stroke();
+      const sy = 178 + ((tSec * 0.25) % 1) * 796;
+      c.beginPath(); c.arc(46, sy, 4, 0, Math.PI * 2);
+      c.fillStyle = '#00f0ff'; c.shadowColor = '#00f0ff'; c.shadowBlur = 12; c.fill();
+      c.restore();
+
+      for (const box of botBoxes.values()) {
+        const b = box.bot;
+        const isW = b.state === 'working';
+        const isU = b.state === 'unread';
+        roundRect(c, box.x, box.y, box.w, box.h, 7);
+        c.fillStyle = isW ? 'rgba(255, 42, 133, 0.14)' : 'rgba(10, 19, 39, 0.94)';
+        c.fill();
+        c.strokeStyle = isW ? '#ff2a85' : isU ? '#ffb800' : b.squad === 'command' ? '#00f0ff' : 'rgba(120, 144, 178, 0.28)';
+        c.lineWidth = isW ? 2 : 1.1;
+        c.stroke();
+
+        // Laser sweep shimmer on WORKING bot
+        if (isW) {
+          c.save();
+          roundRect(c, box.x, box.y, box.w, box.h, 7);
+          c.clip();
+          const lx = box.x - 120 + ((tSec * 240) % (box.w + 240));
+          const lg = c.createLinearGradient(lx, 0, lx + 120, 0);
+          lg.addColorStop(0, 'rgba(255,42,133,0)');
+          lg.addColorStop(0.5, 'rgba(255,42,133,0.28)');
+          lg.addColorStop(1, 'rgba(0,240,255,0)');
+          c.fillStyle = lg;
+          c.fillRect(lx, box.y, 120, box.h);
+          c.restore();
+        }
+
+        // LED
+        c.beginPath();
+        c.arc(box.x + 15, box.y + 18, 4.5, 0, Math.PI * 2);
+        c.fillStyle = isW ? '#ff2a85' : isU ? '#ffb800' : '#00f0ff';
+        c.fill();
+
+        // Name + Agent Model badge + Route badge
+        c.fillStyle = '#eef7ff';
+        c.font = 'bold 14px -apple-system, sans-serif';
+        c.textAlign = 'left';
+        c.fillText(b.shortName || b.name, box.x + 28, box.y + 23);
+
+        const ag = formatAgentBadge(b.agent);
+        const rt = routeBadgeForBot(b);
+        c.fillStyle = isW ? '#ff2a85' : rt.cls === 'gpu' ? '#ffb800' : rt.cls === 'qa' ? '#a77bff' : '#7b95b8';
+        c.font = 'bold 11px ui-monospace, Menlo, monospace';
+        c.textAlign = 'right';
+        c.fillText(rt.text, box.x + box.w - 14, box.y + 22);
+
+        c.fillStyle = ag.color;
+        c.fillText('[' + ag.label + ']', box.x + box.w - 72, box.y + 22);
+
+        // Live task summary
+        if (b.activeSessionTitle || isW) {
+          const tStr = (b.activeToolName ? '[' + b.activeToolName + '] ' : '') + (b.activeSessionTitle || 'Active session');
+          c.fillStyle = isW ? '#ff9ccc' : '#8cbce0';
+          c.font = '11.5px ui-monospace, Menlo, monospace';
+          c.textAlign = 'left';
+          c.fillText(truncText(tStr, 46), box.x + 14, box.y + box.h - 11);
+        }
+
+        // Output port
+        c.beginPath();
+        c.arc(box.portOut.x, box.portOut.y, 4.5, 0, Math.PI * 2);
+        c.fillStyle = isW ? '#ff2a85' : '#071326';
+        c.fill();
+        c.strokeStyle = isW ? '#fff' : '#00f0ff';
+        c.lineWidth = 1.6;
+        c.stroke();
+      }
+
+      // Right Bay: 3 Compute Machine Pods + Live Arc Gauges + Nested Hosted Workers
+      for (const hb of hostBoxes.values()) {
+        const h = hb.host;
+        const isAct = h.activeWorkers > 0;
+        roundRect(c, hb.x, hb.y, hb.w, hb.h, 12);
+        c.fillStyle = 'rgba(6, 13, 28, 0.92)';
+        c.fill();
+        c.strokeStyle = isAct ? 'rgba(255, 42, 133, 0.78)' : 'rgba(0, 240, 255, 0.30)';
+        c.lineWidth = isAct ? 2 : 1.4;
+        c.stroke();
+
+        // Host Header + Ownership
+        c.fillStyle = '#f2f9ff';
+        c.font = 'bold 16px ui-monospace, Menlo, monospace';
+        c.textAlign = 'left';
+        c.fillText(h.label + '  (' + h.specs + ')', hb.x + 18, hb.y + 27);
+
+        c.fillStyle = h.online ? '#00ff9d' : '#ff2a85';
+        c.font = 'bold 12px ui-monospace, Menlo, monospace';
+        c.textAlign = 'right';
+        c.fillText(h.online ? ('ONLINE · ' + h.activeWorkers + 'W') : 'OFFLINE', hb.x + hb.w - 18, hb.y + 26);
+
+        const owner = hostOwnerInfo(h, data.bots || []);
+        c.fillStyle = owner.cls === 'gpu' ? '#ffd46b' : owner.cls === 'qa' ? '#cbb2ff' : '#00f0ff';
+        c.font = '11px ui-monospace, Menlo, monospace';
+        c.textAlign = 'left';
+        c.fillText(owner.text + '  ·  ' + h.endpoint.replace(/^ws:\/\//, ''), hb.x + 18, hb.y + 47);
+
+        // Gauges
+        const m = h.metrics;
+        if (m) {
+          const wobble = Math.sin(tSec * 2.4 + hb.y) * 1.2;
+          if (m.gpu) {
+            const vramPct = m.gpu.vramTotalMiB > 0 ? Math.round((m.gpu.vramUsedMiB / m.gpu.vramTotalMiB) * 100) : 0;
+            const gList = [
+              { l: 'CPU', p: Math.max(0, m.cpuPct + wobble), s: 'ld ' + m.load1, a: '#00f0ff' },
+              { l: 'RAM', p: m.ramPct, s: m.ramUsedGb + '/' + m.ramTotalGb + 'G', a: '#00ff9d' },
+              { l: 'DISK', p: m.diskPct, s: m.diskFreeGb + 'G free', a: '#a77bff' },
+              { l: m.gpu.name || 'GPU', p: m.gpu.utilPct, s: m.gpu.tempC + '°C · ' + m.gpu.powerW + 'W', a: '#ffb800' },
+              { l: 'VRAM', p: vramPct, s: m.gpu.vramUsedMiB + 'M/12G', a: '#ff2a85' }
+            ];
+            gList.forEach((g, gi) => {
+              drawCinemaGauge(c, hb.x + 82 + gi * 142, hb.y + 104, 34, g.l, g.p, g.s, g.a, introEase);
+            });
+          } else {
+            const gList = [
+              { l: 'CPU', p: Math.max(0, m.cpuPct + wobble), s: 'load ' + m.load1, a: '#00f0ff' },
+              { l: 'RAM', p: m.ramPct, s: m.ramUsedGb + '/' + m.ramTotalGb + 'G', a: '#00ff9d' },
+              { l: 'DISK', p: m.diskPct, s: m.diskFreeGb + 'G free', a: '#a77bff' }
+            ];
+            gList.forEach((g, gi) => {
+              drawCinemaGauge(c, hb.x + 135 + gi * 232, hb.y + 98, 33, g.l, g.p, g.s, g.a, introEase);
+            });
+          }
+        }
+
+        // Nested Hosted Workers
+        for (const wk of hb.workers) {
+          const wb = workerBoxes.get(wk.id);
+          if (!wb) continue;
+          const isW = wk.state === 'working';
+          roundRect(c, wb.x, wb.y, wb.w, wb.h, 6);
+          c.fillStyle = isW ? 'rgba(255, 42, 133, 0.16)' : 'rgba(10, 20, 42, 0.94)';
+          c.fill();
+          c.strokeStyle = isW ? '#ff2a85' : wk.state === 'succeeded' ? 'rgba(0, 255, 157, 0.45)' : 'rgba(0, 240, 255, 0.25)';
+          c.lineWidth = isW ? 1.8 : 1.1;
+          c.stroke();
+
+          c.fillStyle = '#f2f9ff';
+          c.font = 'bold 12.5px ui-monospace, Menlo, monospace';
+          c.textAlign = 'left';
+          c.fillText(truncText(wk.title, 34), wb.x + 12, wb.y + 15);
+
+          const wAg = formatAgentBadge(wk.agent);
+          const metaTxt = '[' + wAg.label + '] ' + (wk.bot ? ('via ' + wk.bot) : ('@ ' + wk.host)) + ' · ' + (wk.sessionTitle || wk.workspacePath || '');
+          c.fillStyle = isW ? '#ff9ccc' : '#8cbce0';
+          c.font = '11px ui-monospace, Menlo, monospace';
+          c.fillText(truncText(metaTxt, 68), wb.x + 12, wb.y + 31);
+
+          c.fillStyle = isW ? '#ff2a85' : wk.state === 'succeeded' ? '#00ff9d' : '#00f0ff';
+          c.font = 'bold 11px ui-monospace, Menlo, monospace';
+          c.textAlign = 'right';
+          c.fillText(wk.state.toUpperCase(), wb.x + wb.w - 12, wb.y + 16);
+
+          c.beginPath();
+          c.arc(wb.portIn.x, wb.portIn.y, 4.5, 0, Math.PI * 2);
+          c.fillStyle = isW ? '#ff2a85' : '#071326';
+          c.fill();
+          c.strokeStyle = isW ? '#fff' : '#00ff9d';
+          c.stroke();
+        }
+      }
+
+      // Bottom Cinema Telemetry Bar
+      roundRect(c, 36, 1004, W - 72, 48, 8);
+      c.fillStyle = 'rgba(7, 15, 32, 0.94)';
+      c.fill();
+      c.strokeStyle = 'rgba(0, 240, 255, 0.26)';
+      c.stroke();
+      const latestEv = (data.events && data.events[0]) ? data.events[0].message : 'CYBER HQ RADAR · ALL SYSTEMS NOMINAL';
+      c.fillStyle = '#00f0ff';
+      c.font = 'bold 12.5px ui-monospace, Menlo, monospace';
+      c.textAlign = 'left';
+      c.fillText('// LIVE TELEMETRY:', 54, 1033);
+      c.fillStyle = '#c8e3ff';
+      c.fillText(truncText(latestEv, 110), 212, 1033);
+
+      // Subtle CRT scanline sheen
+      c.fillStyle = 'rgba(0, 240, 255, 0.015)';
+      for (let sy2 = 0; sy2 < H; sy2 += 4) c.fillRect(0, sy2, W, 1);
+
+      frameIdx++;
+      if (elapsed < DURATION_MS) {
+        requestAnimationFrame(drawCinemaFrame);
+      } else {
+        recorder.stop();
+      }
+    }
+
+    requestAnimationFrame(drawCinemaFrame);
+
+    try {
+      const blob = await donePromise;
+      recBtn.textContent = 'SAVING...';
+      const outMime = blob.type || mimeType || 'video/webm';
+      const ext = outMime.includes('mp4') ? 'mp4' : 'webm';
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const fname = 'cyber-hq-radar-' + stamp + '.' + ext;
+
+      const base64 = await blobToBase64(blob);
+      const saved = await apiRequest('hq.saveVideo', {
+        base64,
+        mimeType: outMime,
+        filename: fname,
+        reveal: true
+      });
+      if (saved && saved.saved) {
+        const mb = (saved.bytes / (1024 * 1024)).toFixed(2);
+        showToast('✓ 已导出 ~/Downloads/' + fname + ' (' + mb + 'MB)');
+      } else if (orca && orca.host && orca.host.call) {
+        const buf = await blob.arrayBuffer();
+        await orca.host.call('files.saveAs', { suggestedName: fname, mimeType: outMime, data: buf });
+        showToast('✓ 已导出视频 ' + fname);
+      } else {
+        showToast('! 导出失败: ' + (saved?.error || 'unknown'));
+      }
+    } catch (err) {
+      showToast('! 导出异常: ' + (err && err.message ? err.message : 'failed'));
+    } finally {
+      isRecording = false;
+      recBtn.disabled = false;
+      recBtn.classList.remove('recording');
+      recBtn.textContent = '● REC 1080P';
+    }
+  }
+
+  function updateFsButtonLabel() {
+    if (!fsBtn) return;
+    const inFs = Boolean(document.fullscreenElement);
+    if (wallMode) {
+      fsBtn.textContent = inFs ? '✕ EXIT FS' : '⛶ FULLSCREEN';
+    } else {
+      fsBtn.textContent = '⛶ FULLSCREEN';
+    }
+  }
+
+  document.addEventListener('fullscreenchange', () => {
+    updateFsButtonLabel();
+    setTimeout(resizeCanvas, 80);
+  });
+
+  fsBtn.addEventListener('click', async () => {
+    if (wallMode) {
+      try {
+        if (document.fullscreenElement) {
+          await document.exitFullscreen();
+        } else {
+          await document.documentElement.requestFullscreen();
+        }
+      } catch {
+        showToast('! 按 ⌃⌘F 切换原生全屏');
+      }
+      return;
+    }
+    // Inside Orca sidebar: launch dedicated live Fullscreen Command Wall window
+    fsBtn.disabled = true;
+    fsBtn.textContent = 'LAUNCHING...';
+    try {
+      const res = await apiRequest('hq.openFullscreenWall');
+      if (res && res.opened) {
+        showToast('✓ 已打开独立全屏指挥墙 (SSE 实时同步)');
+      } else {
+        showToast('! 全屏启动失败: ' + (res?.error || 'unknown'));
+      }
+    } catch {
+      showToast('! 全屏启动异常');
+    } finally {
+      fsBtn.disabled = false;
+      updateFsButtonLabel();
+    }
+  });
+
+  recBtn.addEventListener('click', () => { void exportCinemaVideo(); });
+
+  scanBtn.addEventListener('click', async () => {
+    scanBtn.textContent = '...';
+    try {
+      snap = await apiRequest('hq.refresh');
+      renderDom(snap);
+      showToast('✓ RADAR SWEEP COMPLETE');
+    } finally {
+      scanBtn.textContent = 'SCAN';
+    }
+  });
+
+  if (orca && orca.plugin) {
+    orca.plugin.on('hq.snapshot', (next) => {
+      snap = next;
+      renderDom(snap);
+    });
+    apiRequest('hq.getSnapshot').then((next) => {
+      snap = next;
+      renderDom(snap);
+    }).catch(() => {});
+  } else if (wallMode && wallToken) {
+    updateFsButtonLabel();
+    apiRequest('hq.getSnapshot').then((next) => {
+      snap = next;
+      renderDom(snap);
+    }).catch(() => {});
+    const es = new EventSource('/api/events?token=' + encodeURIComponent(wallToken));
+    es.addEventListener('snapshot', (ev) => {
+      try {
+        snap = JSON.parse(ev.data);
+        renderDom(snap);
+      } catch {}
+    });
+  }
+})();
+</script>
+</body>
+</html>
