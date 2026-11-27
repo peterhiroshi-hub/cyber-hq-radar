@@ -43,9 +43,10 @@ declare module 'node:url' {
 }
 
 declare module 'node:fs/promises' {
-  export function mkdir(path: string, options?: { recursive?: boolean }): Promise<string | undefined>
-  export function writeFile(path: string, data: Uint8Array | string): Promise<void>
+  export function mkdir(path: string, options?: { recursive?: boolean; mode?: number }): Promise<string | undefined>
+  export function writeFile(path: string, data: Uint8Array | string, options?: { mode?: number }): Promise<void>
   export function readFile(path: string, encoding: 'utf8'): Promise<string>
+  export function chmod(path: string, mode: number): Promise<void>
   export function access(path: string): Promise<void>
 }
 
@@ -82,6 +83,8 @@ declare module 'node:http' {
   }
   export interface Server {
     listen(port: number, host: string, cb?: () => void): void
+    once(event: 'error' | 'listening', listener: (err?: Error & { code?: string }) => void): void
+    removeAllListeners(event?: string): void
     address(): { port: number; address: string } | string | null
     close(cb?: () => void): void
   }

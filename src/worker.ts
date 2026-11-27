@@ -2305,11 +2305,33 @@ export default function activate(
     }
   }
 
+  const workerBootId = crypto.randomBytes(8).toString('hex')
+  const usePersistentWallEndpoint = videoSaver === defaultVideoSaver && wallOpener === defaultWallOpener
+
+  const loadOrCreateWallToken = async (): Promise<string> => {
+    if (!usePersistentWallEndpoint) {
+      return crypto.randomBytes(16).toString('hex')
+    }
+    const cfgDir = path.join(os.homedir(), '.config', 'cyber-hq-radar')
+    const tokFile = path.join(cfgDir, 'wall.token')
+    try {
+      const existing = (await fs.readFile(tokFile, 'utf8')).trim()
+      if (/^[a-f0-9]{32,64}$/i.test(existing)) return existing
+    } catch {}
+    const fresh = crypto.randomBytes(16).toString('hex')
+    try {
+      await fs.mkdir(cfgDir, { recursive: true, mode: 0o700 })
+      await fs.writeFile(tokFile, `${fresh}\n`, { mode: 0o600 })
+      await fs.chmod(tokFile, 0o600).catch(() => {})
+    } catch {}
+    return fresh
+  }
+
   const ensureWallServer = async (): Promise<string> => {
     if (wallServer && wallPort > 0 && wallToken) {
       return `http://127.0.0.1:${wallPort}/?wall=1&token=${wallToken}`
     }
-    wallToken = crypto.randomBytes(16).toString('hex')
+    wallToken = await loadOrCreateWallToken()
     const panelPath = resolvePanelHtmlPath()
 
     const srv = http.createServer((req, res) => {
@@ -2392,6 +2414,7 @@ export default function activate(
           Connection: 'keep-alive'
         })
         sseClients.add(res)
+        res.write(`event: meta\ndata: ${JSON.stringify({ bootId: workerBootId })}\n\n`)
         if (latestSnapshot) {
           res.write(`event: snapshot\ndata: ${JSON.stringify(latestSnapshot)}\n\n`)
         }
@@ -2468,9 +2491,30 @@ export default function activate(
       res.end('Not found')
     })
 
-    await new Promise<void>((resolve) => {
-      srv.listen(0, '127.0.0.1', () => resolve())
-    })
+    const listenOnPort = (port: number) =>
+      new Promise<void>((resolve, reject) => {
+        const onErr = (err?: Error & { code?: string }) => {
+          srv.removeAllListeners('listening')
+          reject(err || new Error('listen failed'))
+        }
+        const onListening = () => {
+          srv.removeAllListeners('error')
+          resolve()
+        }
+        srv.once('error', onErr)
+        srv.once('listening', onListening)
+        srv.listen(port, '127.0.0.1')
+      })
+
+    if (usePersistentWallEndpoint) {
+      try {
+        await listenOnPort(19769)
+      } catch {
+        await listenOnPort(0)
+      }
+    } else {
+      await listenOnPort(0)
+    }
     const addr = srv.address()
     wallServer = srv
     wallPort = typeof addr === 'object' && addr ? addr.port : 0

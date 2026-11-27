@@ -668,7 +668,10 @@ const server = http.createServer((req, res) => {
             res.end('{"ok":false,"activated":false,"error":"folder_not_supported_via_cli"}')
             return
           }
-          const isSelfHost = host === 'local' || host.toLowerCase() === ENV_HINT.toLowerCase()
+          const isKnownChild = lastKnownEnvs.some(
+            (e) => String(e?.name || e?.id || '').toLowerCase() === host.toLowerCase()
+          )
+          const isSelfHost = host === 'local' || host.toLowerCase() === ENV_HINT.toLowerCase() || !isKnownChild
           const cliArgs = isSelfHost
             ? ['worktree', 'activate', '--worktree', selector, '--json']
             : ['worktree', 'activate', '--environment', host, '--worktree', selector, '--json']

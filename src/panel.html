@@ -1913,13 +1913,22 @@
     if (!pinned) applyHoverClasses();
   });
 
+  let wallDisconnected = false;
+
+  function wallErrToast(fallbackMsg) {
+    if (wallMode && wallDisconnected) {
+      return '! Disconnected from Orca plugin — reopen via ⛶ FULLSCREEN';
+    }
+    return fallbackMsg;
+  }
+
   async function jumpToNeedsYou(payload, label) {
     showToast('JUMPING → ' + String(label || 'Needs You').slice(0, 26) + '...');
     try {
       const res = await apiRequest('hq.openNeedsYou', payload);
       showToast(res?.opened ? ('✓ ' + (res.detail || 'Opened')) : ('! ' + (res?.detail || 'Unable to jump')));
     } catch {
-      showToast('! Jump failed');
+      showToast(wallErrToast('! Jump failed'));
     }
   }
 
@@ -1929,7 +1938,7 @@
       const res = await apiRequest('hq.openTasksView');
       showToast(res?.opened ? ('✓ ' + (res.detail || 'Opened Orca Tasks / Needs You queue')) : ('! ' + (res?.detail || 'Unable to open Tasks queue')));
     } catch {
-      showToast('! Failed to open Tasks queue');
+      showToast(wallErrToast('! Failed to open Tasks queue'));
     }
   }
 
@@ -1999,7 +2008,7 @@
         const res = await apiRequest('hq.openSession', payload);
         showToast(res?.opened ? ('✓ ' + res.detail) : ('! ' + (res?.detail || 'No session')));
       } catch {
-        showToast('! Session jump failed');
+        showToast(wallErrToast('! Session jump failed'));
       }
       return;
     }
@@ -2034,7 +2043,7 @@
         });
         showToast(res?.opened ? ('✓ ' + (res.detail || (bName + ' Session'))) : ('! ' + (res?.detail || 'Unable to open')));
       } catch {
-        showToast('! Failed to open Bot');
+        showToast(wallErrToast('! Failed to open Bot'));
       }
       return;
     }
@@ -3606,8 +3615,39 @@
       renderDom(snap);
     }).catch(() => {});
     const es = new EventSource('/api/events?token=' + encodeURIComponent(wallToken));
+    let seenBootId = null;
+    let sseErrCount = 0;
+    es.addEventListener('meta', (ev) => {
+      try {
+        const meta = JSON.parse(ev.data);
+        if (meta && meta.bootId) {
+          if (seenBootId && seenBootId !== meta.bootId) {
+            window.location.reload();
+            return;
+          }
+          seenBootId = meta.bootId;
+        }
+      } catch {}
+    });
+    es.onopen = () => {
+      sseErrCount = 0;
+      if (wallDisconnected) {
+        wallDisconnected = false;
+        showToast('✓ Reconnected to Orca plugin');
+      }
+    };
+    es.onerror = () => {
+      sseErrCount += 1;
+      if (sseErrCount >= 2) {
+        wallDisconnected = true;
+        const clk = document.getElementById('clockLine');
+        if (clk) clk.textContent = 'DISCONNECTED · REOPEN VIA ⛶ FULLSCREEN IN ORCA';
+      }
+    };
     es.addEventListener('snapshot', (ev) => {
       try {
+        wallDisconnected = false;
+        sseErrCount = 0;
         snap = JSON.parse(ev.data);
         renderDom(snap);
       } catch {}
