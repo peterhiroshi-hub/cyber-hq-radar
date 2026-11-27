@@ -47,10 +47,12 @@ export type BotNodeInfo = {
   botHost: HostId
   primaryHost: HostId
   secondaryHost: HostId | null
+  targetHosts?: HostId[]
   agent: string
   state: 'working' | 'unread' | 'idle' | 'paused'
   chatsCount: number
   workspaceId: string | null
+  workspacePath?: string | null
   activeDispatchCount: number
   activeSessionTitle: string | null
   activeToolName: string | null
@@ -105,6 +107,8 @@ export type OpenSessionInput = {
   terminalId?: string | null
   sessionId?: string | null
   workspacePath?: string | null
+  botName?: string | null
+  title?: string | null
   fallbackWorkspaceId?: string | null
 }
 

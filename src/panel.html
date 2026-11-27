@@ -1310,7 +1310,7 @@
     }
 
     return '<div class="' + cls + '" data-bot-name="' + escapeHtml(b.name) + '" data-bot-id="' + escapeHtml(b.id) + '" ' +
-      'data-ws="' + escapeHtml(b.workspaceId || '') + '" data-host="' + escapeHtml(b.botHost || 'local') + '">' +
+      'data-ws="' + escapeHtml(b.workspaceId || '') + '" data-wpath="' + escapeHtml(b.workspacePath || '') + '" data-host="' + escapeHtml(b.botHost || 'local') + '">' +
       '<div class="bot-top">' +
         '<div class="bot-id"><span class="led ' + ledCls + '"></span>' +
         '<span class="bot-label" title="' + escapeHtml(b.name) + '">' + escapeHtml(b.shortName || b.name) + '</span></div>' +
@@ -1485,6 +1485,18 @@
     cachedLiveConduits = liveList;
   }
 
+  function botTargetHosts(b) {
+    if (!b) return [];
+    const list = Array.isArray(b.targetHosts) && b.targetHosts.length
+      ? b.targetHosts
+      : [b.botHost, b.primaryHost, b.secondaryHost];
+    const out = [];
+    for (const h of list) {
+      if (h && !out.includes(h)) out.push(h);
+    }
+    return out;
+  }
+
   function updateInspectorForFocus(f) {
     if (!f) {
       inspectorText.innerHTML = '<b>[TIP]</b> Hover or click a host to pin its conduits · Click blank space or press ESC to clear · Click a Bot or Worker to open its Orca Session';
@@ -1505,7 +1517,7 @@
     if (f.kind === 'bot') {
       const b = snap?.bots?.find((x) => x.name === f.botName);
       const ag = formatAgentBadge(b?.agent);
-      const targets = [hostShort(b?.primaryHost), b?.secondaryHost ? hostShort(b.secondaryHost) : null].filter(Boolean).join(' + ');
+      const targets = botTargetHosts(b).map((h) => hostShort(h)).filter(Boolean).join(' + ');
       inspectorText.innerHTML = '<b>[BOT]</b> ' + escapeHtml(f.botName || '') +
         ' · Engine <b style="color:' + ag.color + '">' + escapeHtml(ag.label) + '</b>' +
         ' · Brain on <b>' + escapeHtml(hostShort(b?.botHost)) + '</b> → Routes to <b>' + escapeHtml(targets) + '</b>' +
@@ -1541,7 +1553,7 @@
       const match =
         (f.kind === 'bot' && bName === f.botName) ||
         (f.kind === 'worker' && bName === f.botName) ||
-        (f.kind === 'host' && bot && (bot.primaryHost === f.hostId || bot.secondaryHost === f.hostId || bot.botHost === f.hostId));
+        (f.kind === 'host' && bot && botTargetHosts(bot).includes(f.hostId));
       el.classList.toggle('hi', Boolean(match));
       el.classList.toggle('dim', !match);
     });
@@ -1564,7 +1576,7 @@
       const match =
         (f.kind === 'host' && hId === f.hostId) ||
         (f.kind === 'worker' && hId === f.hostId) ||
-        (f.kind === 'bot' && bot && (bot.primaryHost === hId || bot.secondaryHost === hId || bot.botHost === hId));
+        (f.kind === 'bot' && bot && botTargetHosts(bot).includes(hId));
       el.classList.toggle('hi', Boolean(match));
       el.classList.toggle('dim', !match);
     });
@@ -1625,6 +1637,8 @@
         workspaceId: wEl.getAttribute('data-ws') || null,
         host: wEl.getAttribute('data-worker-host') || 'local',
         workspacePath: wEl.getAttribute('data-wpath') || null,
+        botName: wEl.getAttribute('data-worker-bot') || null,
+        title,
         terminalId: wEl.getAttribute('data-term') || null,
         sessionId: wEl.getAttribute('data-session') || null,
         fallbackWorkspaceId: wEl.getAttribute('data-fallback-ws') || null
@@ -1643,15 +1657,17 @@
     if (bEl) {
       const bName = bEl.getAttribute('data-bot-name') || 'Bot';
       const ws = bEl.getAttribute('data-ws') || null;
+      const wpath = bEl.getAttribute('data-wpath') || null;
       const host = bEl.getAttribute('data-host') || 'local';
-      if (!ws) {
-        showToast('! ' + bName + ' has no openable session');
-        return;
-      }
       showToast('OPENING → ' + bName + '...');
       try {
-        const res = await apiRequest('hq.openSession', { workspaceId: ws, host });
-        showToast(res?.opened ? ('✓ ' + bName + ' Session') : '! Unable to open');
+        const res = await apiRequest('hq.openSession', {
+          workspaceId: ws,
+          workspacePath: wpath,
+          botName: bName,
+          host
+        });
+        showToast(res?.opened ? ('✓ ' + (res.detail || (bName + ' Session'))) : ('! ' + (res?.detail || 'Unable to open')));
       } catch {
         showToast('! Failed to open Bot');
       }
@@ -1736,12 +1752,12 @@
       for (const b of snap.bots || []) {
         const src = botPorts.get(b.name);
         if (!src) continue;
-        const targets = [b.primaryHost, b.secondaryHost].filter(Boolean);
+        const targets = botTargetHosts(b);
         const hasLiveWorker = liveWorkerBots.has(b.name);
         for (const tHost of targets) {
           const dst = hostPorts.get(tHost);
           if (!dst) continue;
-          const isBotLive = b.state === 'working' && !hasLiveWorker && tHost === (b.botHost || 'local');
+          const isBotLive = b.state === 'working' && tHost === (b.botHost || 'local');
           const dx = Math.max(36, Math.abs(dst.x - src.x) * 0.52);
           conduits.push({
             src, dst,
@@ -2396,10 +2412,10 @@
       for (const b of orderedBots) {
         const sb = botBoxes.get(b.name);
         if (!sb) continue;
-        for (const th of [b.primaryHost, b.secondaryHost].filter(Boolean)) {
+        for (const th of botTargetHosts(b)) {
           const hb = hostBoxes.get(th);
           if (!hb) continue;
-          const isBotLive = b.state === 'working' && !liveWorkerBots.has(b.name) && th === (b.botHost || 'local');
+          const isBotLive = b.state === 'working' && th === (b.botHost || 'local');
           cinemaConduits.push({
             src: sb.portOut, dst: hb.portIn,
             color: isBotLive ? '#ff2a85' : squadColor(b.squad),

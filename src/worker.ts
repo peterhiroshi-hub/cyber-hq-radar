@@ -596,6 +596,27 @@ export function classifySquad(name: string | null | undefined, knownSquads?: Ite
   return 'fleet'
 }
 
+export function formatWorktreeTitle(
+  displayName?: string | null,
+  repo?: string | null,
+  branch?: string | null,
+  fallback = 'workspace'
+): string {
+  const cleanBranch = branch ? branch.replace(/^refs\/heads\//, '').trim() : ''
+  const dn = (displayName || '').trim()
+  const rp = (repo || '').trim()
+  const base = dn || cleanBranch || rp || fallback
+  if (
+    rp &&
+    base &&
+    rp.toLowerCase() !== base.toLowerCase() &&
+    (/^(?:main|master|develop|dev|staging|prod|release)$/i.test(base) || (cleanBranch && base === cleanBranch))
+  ) {
+    return `${rp} / ${base}`
+  }
+  return base
+}
+
 export function shortBotLabel(name: string): string {
   const words = name.trim().split(/\s+/)
   if (words.length >= 3) {
@@ -843,7 +864,9 @@ export async function collectHqSnapshot(
   const relayedResults: RemoteHostResult[] = []
 
   for (const hub of directRemoteResults) {
-    if (!hub.httpRelay || !hub.httpRelaySnap || !Array.isArray(hub.httpRelaySnap.children)) continue
+    if (!hub.httpRelay || !hub.httpRelaySnap) continue
+    if (hubHttpByHostOut) hubHttpByHostOut.set(hub.envName, hub.httpRelay)
+    if (!Array.isArray(hub.httpRelaySnap.children)) continue
     for (const ch of hub.httpRelaySnap.children) {
       const childName = ch.envName || ch.env?.name || ch.env?.id || ''
       if (!childName) continue
@@ -1141,7 +1164,7 @@ export async function collectHqSnapshot(
       const squad = classifySquad(bot || `${row.displayName || ''} ${row.repo || ''} ${row.branch || ''} ${cleanLocalPath}`, knownSquads)
       workers.push({
         id: wtId || `${row.repo}:${row.displayName}`,
-        title: row.displayName || row.branch || row.repo || 'workspace',
+        title: formatWorktreeTitle(row.displayName, row.repo, row.branch, 'workspace'),
         host,
         bot,
         parentBotWorkspaceId: parentWsKey,
@@ -1175,7 +1198,12 @@ export async function collectHqSnapshot(
       if (matchedPs?.botHome || matchedPs?.repo === 'Bots') continue
       const bestAgent = pickBestAgent(matchedPs?.agents)
       const wsPath = matchedPs?.path || (ws.includes('::') ? ws.split('::')[1] : ws)
-      const shortName = matchedPs?.displayName || wsPath.split('/').filter(Boolean).pop() || w.dispatchId || 'worker'
+      const shortName = formatWorktreeTitle(
+        matchedPs?.displayName,
+        matchedPs?.repo,
+        matchedPs?.branch,
+        wsPath.split('/').filter(Boolean).pop() || w.dispatchId || 'worker'
+      )
       const mapped = mapWorkerState(w.state, w.liveness, bestAgent?.state)
       if (mapped !== 'working' && workers.filter((x) => x.host === envName).length >= 5) continue
 
@@ -1232,7 +1260,7 @@ export async function collectHqSnapshot(
       const squad = classifySquad(bot || `${rps.displayName || ''} ${rps.repo || ''} ${cleanRpsPath}`, knownSquads)
       workers.push({
         id: ws,
-        title: rps.displayName || rps.branch || rps.repo || 'workspace',
+        title: formatWorktreeTitle(rps.displayName, rps.repo, rps.branch, 'workspace'),
         host: envName,
         bot,
         parentBotWorkspaceId: parentWsKey,
@@ -1357,6 +1385,14 @@ export async function collectHqSnapshot(
     const secondaryHost: HostId | null =
       trafficHosts[1] || (primaryHost !== actualBotHost && validHostIds.has(actualBotHost) ? actualBotHost : null)
 
+    // Always retain the Bot's own hosting machine (actualBotHost) PLUS every real remote traffic host
+    const targetHosts: HostId[] = []
+    if (validHostIds.has(actualBotHost)) targetHosts.push(actualBotHost)
+    for (const th of trafficHosts) {
+      if (th && validHostIds.has(th) && !targetHosts.includes(th)) targetHosts.push(th)
+    }
+    if (targetHosts.length === 0 && primaryHost) targetHosts.push(primaryHost)
+
     let state: BotNodeInfo['state'] = 'idle'
     if (b.paused) state = 'paused'
     else if (home?.status === 'working' || bestAgent?.state === 'working' || activeDispatchCount > 0) state = 'working'
@@ -1372,10 +1408,12 @@ export async function collectHqSnapshot(
       botHost: actualBotHost,
       primaryHost,
       secondaryHost,
+      targetHosts,
       agent: b.agent || 'antigravity',
       state,
       chatsCount: b.chats?.count ?? 1,
       workspaceId,
+      workspacePath: home?.path ?? null,
       activeDispatchCount,
       activeSessionTitle: pickAgentSummary(bestAgent),
       activeToolName: bestAgent?.state === 'working' ? (bestAgent.toolName || null) : null,
@@ -1545,53 +1583,115 @@ export default function activate(
     const host = input?.host || 'local'
     const wsId = input?.workspaceId || null
     const wsPath = input?.workspacePath || null
+    const botName = input?.botName || null
+    const title = input?.title || null
     const termId = input?.terminalId || null
     const fallbackWs = input?.fallbackWorkspaceId || null
 
-    if (host === 'local') {
-      if (wsId) {
-        const opened = await orca.host.call('workspace.open', { workspaceId: wsId }).catch(() => null)
-        let targetTerm = termId && termId.startsWith('term_') ? termId : null
-        if (!targetTerm) {
-          const agentsRes = await orca.host.call('agents.list', { workspaceId: wsId }).catch(() => null)
-          const activeAgent = agentsRes?.agents?.find((a) => a.terminalId && a.state === 'working')
-            || agentsRes?.agents?.find((a) => a.terminalId)
-          if (activeAgent?.terminalId) targetTerm = activeAgent.terminalId
-        }
-        if (targetTerm) {
-          const foc = await orca.host.call('terminal.focus', { terminalId: targetTerm }).catch(() => null)
-          if (foc?.focused) {
-            pushLog('workspace', `FOCUSED SESSION :: ${wsPath || wsId}`)
-            return { opened: true, mode: 'focused', detail: 'Focused live Orca session pane' }
-          }
-        }
-        if (opened?.opened) {
-          pushLog('workspace', `OPENED WORKSPACE :: ${wsPath || wsId}`)
-          return { opened: true, mode: 'opened', detail: 'Opened Orca workspace' }
-        }
-      }
-      if (fallbackWs) {
-        const fb = await orca.host.call('workspace.open', { workspaceId: fallbackWs }).catch(() => null)
-        if (fb?.opened) return { opened: true, mode: 'fallback', detail: 'Opened parent Bot session' }
-      }
-      return { opened: false, mode: 'none', detail: 'No matching local session' }
+    const listRes = await orca.host.call('workspace.list', { includeStatus: false }).catch(() => null)
+    const allWorkspaces = listRes?.workspaces ?? []
+
+    const hostMatches = (wHostId: string | null | undefined, targetHost: string): boolean => {
+      if (targetHost === 'local') return !wHostId || wHostId === 'local'
+      if (!wHostId) return false
+      const normW = wHostId.toLowerCase().replace(/^runtime:/, '')
+      const normT = targetHost.toLowerCase().replace(/^runtime:/, '')
+      return normW === normT || wHostId.toLowerCase() === targetHost.toLowerCase()
     }
 
-    if (wsId || wsPath) {
-      const listRes = await orca.host.call('workspace.list', { includeStatus: false }).catch(() => null)
-      const matched = listRes?.workspaces?.find((w) =>
-        (wsId && w.id === wsId) || (wsPath && w.path === wsPath)
-      )
-      if (matched) {
-        const opened = await orca.host.call('workspace.open', { workspaceId: matched.id }).catch(() => null)
-        if (opened?.opened) {
-          pushLog('workspace', `OPENED REMOTE WORKSPACE :: ${host} · ${wsPath || wsId}`)
-          return { opened: true, mode: 'opened', detail: `Opened ${host} workspace in Orca` }
-        }
+    const findWorkspaceInHostList = (
+      candidateId: string | null,
+      candidatePath: string | null,
+      candidateBotName: string | null,
+      candidateTitle: string | null,
+      targetHost: string
+    ) => {
+      if (allWorkspaces.length === 0) return null
+      if (candidateId) {
+        const exact = allWorkspaces.find((w) => w.id === candidateId)
+        if (exact) return exact
+        const suffix = allWorkspaces.find(
+          (w) =>
+            w.id.endsWith(`:${candidateId}`) ||
+            w.id.endsWith(`::${candidateId}`) ||
+            candidateId.endsWith(`:${w.id}`)
+        )
+        if (suffix) return suffix
       }
+      if (candidatePath) {
+        const byPathHost = allWorkspaces.find((w) => w.path === candidatePath && hostMatches(w.hostId, targetHost))
+        if (byPathHost) return byPathHost
+        const byPath = allWorkspaces.find((w) => w.path === candidatePath)
+        if (byPath) return byPath
+      }
+      if (candidateBotName) {
+        const lowerBot = candidateBotName.toLowerCase()
+        const byBotHost = allWorkspaces.find(
+          (w) => w.kind === 'folder' && w.name.toLowerCase() === lowerBot && hostMatches(w.hostId, targetHost)
+        )
+        if (byBotHost) return byBotHost
+        const byBot = allWorkspaces.find((w) => w.kind === 'folder' && w.name.toLowerCase() === lowerBot)
+        if (byBot) return byBot
+      }
+      if (candidateTitle) {
+        const cleanTitle = candidateTitle.includes(' / ')
+          ? candidateTitle.split(' / ').slice(-1)[0].trim().toLowerCase()
+          : candidateTitle.trim().toLowerCase()
+        const byTitleHost = allWorkspaces.find(
+          (w) =>
+            hostMatches(w.hostId, targetHost) &&
+            (w.name.toLowerCase() === cleanTitle || (w.branch && w.branch.toLowerCase() === cleanTitle))
+        )
+        if (byTitleHost) return byTitleHost
+      }
+      return null
     }
 
-    if (termId && termId.startsWith('term_')) {
+    const openResolvedWorkspace = async (
+      resolvedWsId: string,
+      label: string,
+      preferredTermId: string | null
+    ): Promise<OpenSessionOutput | null> => {
+      const opened = await orca.host.call('workspace.open', { workspaceId: resolvedWsId }).catch((err) => {
+        orca.log(`workspace.open(${resolvedWsId}) failed: ${err instanceof Error ? err.message : String(err)}`)
+        return null
+      })
+      let targetTerm = preferredTermId && preferredTermId.startsWith('term_') ? preferredTermId : null
+      if (!targetTerm) {
+        const agentsRes = await orca.host.call('agents.list', { workspaceId: resolvedWsId }).catch(() => null)
+        const activeAgent = agentsRes?.agents?.find((a) => a.terminalId && a.state === 'working')
+          || agentsRes?.agents?.find((a) => a.terminalId)
+        if (activeAgent?.terminalId) targetTerm = activeAgent.terminalId
+      }
+      if (targetTerm) {
+        const foc = await orca.host.call('terminal.focus', { terminalId: targetTerm }).catch(() => null)
+        if (foc?.focused) {
+          pushLog('workspace', `FOCUSED SESSION :: ${label}`)
+          return { opened: true, mode: 'focused', detail: 'Focused live Orca session pane' }
+        }
+      }
+      if (opened?.opened) {
+        pushLog('workspace', `OPENED WORKSPACE :: ${label}`)
+        return { opened: true, mode: 'opened', detail: `Opened ${label} in Orca` }
+      }
+      return null
+    }
+
+    // 1. Try resolving directly against this Orca window's workspace.list (works for local AND directly paired remote workspaces)
+    const matched = findWorkspaceInHostList(wsId, wsPath, botName, title, host)
+    if (matched) {
+      const res = await openResolvedWorkspace(matched.id, matched.name || wsPath || matched.id, host === 'local' ? termId : null)
+      if (res) return res
+    }
+
+    // 2. Direct workspace.open attempt (for local workspaces or folder workspaces that CLI activate cannot open)
+    if (wsId && (host === 'local' || wsId.startsWith('folder:'))) {
+      const direct = await openResolvedWorkspace(wsId, botName || wsPath || wsId, host === 'local' ? termId : null)
+      if (direct) return direct
+    }
+
+    // 3. Direct remote terminal switch if a live remote terminal handle is known
+    if (host !== 'local' && termId && termId.startsWith('term_')) {
       const switched = await cli(['terminal', 'switch', '--environment', host, '--terminal', termId, '--json'])
       if (switched) {
         pushLog('workspace', `SWITCHED REMOTE SESSION :: ${host} · ${termId}`)
@@ -1599,35 +1699,63 @@ export default function activate(
       }
     }
 
-    const selector = wsId ? `id:${wsId}` : wsPath ? `path:${wsPath}` : null
-    if (selector) {
+    // 4. Remote/relayed worktree activation (non-folder worktrees only; folder workspaces cannot be activated via CLI)
+    const isFolder = Boolean(wsId && wsId.startsWith('folder:'))
+    const selector = !isFolder && wsId ? `id:${wsId}` : !isFolder && wsPath ? `path:${wsPath}` : null
+    let activatedRemotely = false
+    if (host !== 'local' && selector) {
       const hubHttp = hubHttpByHost.get(host)
       if (hubHttp) {
         const activated = await hubRelayClient.activateWorktree(hubHttp, host, selector).catch(() => false)
         if (activated) {
+          activatedRemotely = true
           pushLog('workspace', `ACTIVATED VIA HUB RELAY :: ${host} · ${wsPath || wsId}`)
-          return { opened: true, mode: 'activated', detail: `Activated on ${host}` }
         }
       }
-      const hubSsh = hubSshByHost.get(host)
-      const act = hubSsh
-        ? await relayCli(hubSsh, ['worktree', 'activate', '--environment', host, '--worktree', selector, '--json'])
-        : await cli(['worktree', 'activate', '--environment', host, '--worktree', selector, '--json'])
-      if (act && (act as { activated?: boolean }).activated !== false) {
-        pushLog('workspace', `ACTIVATED REMOTE WORKTREE :: ${host} · ${wsPath || wsId}`)
-        return { opened: true, mode: 'activated', detail: `Activated on ${host}` }
+      if (!activatedRemotely) {
+        const hubSsh = hubSshByHost.get(host)
+        const act = hubSsh
+          ? await relayCli(hubSsh, ['worktree', 'activate', '--environment', host, '--worktree', selector, '--json'])
+          : await cli(['worktree', 'activate', '--environment', host, '--worktree', selector, '--json'])
+        if (act && (act as { activated?: boolean }).activated !== false) {
+          activatedRemotely = true
+          pushLog('workspace', `ACTIVATED REMOTE WORKTREE :: ${host} · ${wsPath || wsId}`)
+        }
       }
     }
 
-    if (fallbackWs) {
-      const fb = await orca.host.call('workspace.open', { workspaceId: fallbackWs }).catch(() => null)
-      if (fb?.opened) {
-        pushLog('workspace', `OPENED PARENT BOT :: ${fallbackWs}`)
-        return { opened: true, mode: 'fallback', detail: 'Opened dispatching Bot session' }
+    // 5. Fallback to opening the dispatching parent Bot in this Orca window (always helpful for relayed workers not directly paired locally)
+    if (fallbackWs || (!matched && botName)) {
+      const fbMatch = findWorkspaceInHostList(fallbackWs, null, botName, null, host)
+      const fbId = fbMatch?.id || fallbackWs
+      if (fbId) {
+        const fb = await orca.host.call('workspace.open', { workspaceId: fbId }).catch(() => null)
+        if (fb?.opened) {
+          const fbLabel = fbMatch?.name || botName || fbId
+          pushLog('workspace', `OPENED PARENT BOT :: ${fbLabel}`)
+          return {
+            opened: true,
+            mode: activatedRemotely ? 'activated' : 'fallback',
+            detail: activatedRemotely
+              ? `Activated on ${host} & opened ${fbLabel}`
+              : `Opened ${fbLabel} session`
+          }
+        }
       }
     }
 
-    return { opened: false, mode: 'none', detail: `Could not open session on ${host}` }
+    if (activatedRemotely) {
+      return { opened: true, mode: 'activated', detail: `Activated on ${host}` }
+    }
+
+    orca.log(`hq.openSession unresolved: host=${host} wsId=${wsId || ''} path=${wsPath || ''} bot=${botName || ''} listed=${allWorkspaces.length}`)
+    return {
+      opened: false,
+      mode: 'none',
+      detail: host === 'local'
+        ? 'No matching local session'
+        : `Not paired in this Orca window (${host})`
+    }
   }
 
   const pendingVideoUploads = new Map<

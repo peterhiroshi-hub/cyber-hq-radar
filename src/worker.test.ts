@@ -1016,3 +1016,120 @@ test('chunked hq.saveVideo stays strictly under Orca 64 KiB IPC frame limit acro
 
   await worker.deactivate()
 })
+
+test('preserves bot home-host conduit alongside 2+ remote targets, disambiguates generic branch titles, and resolves session jump by path/name/suffix', async () => {
+  const openedIds: string[] = []
+  const host = mockHost({
+    results: {
+      'settings.get': { settings: {} },
+      'workspace.list': {
+        workspaces: [
+          {
+            id: 'runtime:env-hub:folder:copilot-1',
+            kind: 'folder',
+            name: 'Orion Copilot',
+            path: '/Users/dev/.orca/bots/orion-copilot',
+            branch: null,
+            hostId: 'runtime:env-hub'
+          },
+          {
+            id: 'runtime:env-hub:repo-be::/work/backend',
+            kind: 'worktree',
+            name: 'develop',
+            path: '/work/backend',
+            branch: 'develop',
+            hostId: 'runtime:env-hub'
+          }
+        ],
+        truncated: false
+      },
+      'workspace.open': (params: unknown) => {
+        const id = (params as { workspaceId?: string })?.workspaceId
+        if (id) openedIds.push(id)
+        return { opened: true }
+      },
+      'agents.list': { agents: [] }
+    }
+  })
+
+  const mockCli: CliRunner = async (args) => {
+    if (args[0] === 'environment' && args[1] === 'list') {
+      return {
+        environments: [
+          { id: 'env-hub', name: 'hub-mac', endpoints: [{ endpoint: 'ws://100.80.1.2:6768' }] }
+        ]
+      }
+    }
+    return { bots: [], workers: [], worktrees: [], items: [] }
+  }
+
+  const mockMetrics: MetricsRunner = async () => null
+  const mockHubHttp: HubRelayClient = {
+    async fetchSnapshot() {
+      return {
+        ok: true,
+        host: {
+          hostname: 'hub-mac',
+          metrics: { cpuPct: 20, ramPct: 50, ramUsedGb: 8, ramTotalGb: 16, diskPct: 70, diskFreeGb: 40, load1: 1.5, cores: 10, osName: 'macOS', gpu: null },
+          bots: [{ id: 'b-cop', name: 'Orion Copilot', agent: 'antigravity' }],
+          worktrees: [
+            { worktreeId: 'folder:copilot-1', repo: 'Bots', bot: 'Orion Copilot', botHome: true, status: 'working', path: '/Users/dev/.orca/bots/orion-copilot', lastActivityAt: 900 },
+            { worktreeId: 'repo-be::/work/backend', repo: 'backend', displayName: 'develop', branch: 'refs/heads/develop', status: 'active', path: '/work/backend', lastActivityAt: 800 },
+            { worktreeId: 'repo-fe::/work/frontend', repo: 'frontend', displayName: 'develop', branch: 'refs/heads/develop', status: 'active', path: '/work/frontend', lastActivityAt: 700 }
+          ],
+          dispatches: [
+            { bot: 'Orion Copilot', dispatchId: 'd1', server: 'qa-box', title: 'QA audit', startedAt: Date.now() },
+            { bot: 'Orion Copilot', dispatchId: 'd2', server: 'gpu-box', title: 'GPU build', startedAt: Date.now() - 1000 }
+          ]
+        },
+        children: [
+          { env: { id: 'c1', name: 'qa-box' }, envName: 'qa-box', ok: true, workers: [], remotePs: [], metrics: null },
+          { env: { id: 'c2', name: 'gpu-box' }, envName: 'gpu-box', ok: true, workers: [], remotePs: [], metrics: null }
+        ]
+      }
+    },
+    async activateWorktree() { return false }
+  }
+
+  const mod = {
+    default: (orca: Parameters<typeof main.default>[0]) =>
+      main.default(orca, mockCli, mockMetrics, undefined, undefined, undefined, mockHubHttp),
+    deactivate: main.deactivate
+  }
+  const worker = await mountWorker(mod, { host })
+  const snap = await worker.request('hq.getSnapshot')
+
+  // Bot with 2 remote traffic hosts MUST still retain its home host (hub-mac) in targetHosts
+  const copilot = snap.bots.find((b) => b.name === 'Orion Copilot')
+  assert.equal(copilot?.botHost, 'hub-mac')
+  assert.ok(copilot?.targetHosts?.includes('hub-mac'))
+  assert.ok(copilot?.targetHosts?.includes('qa-box'))
+  assert.ok(copilot?.targetHosts?.includes('gpu-box'))
+
+  // Generic branch worktrees include repo prefix to avoid duplicate "develop" cards
+  const beWk = snap.workers.find((w) => w.workspacePath === '/work/backend')
+  const feWk = snap.workers.find((w) => w.workspacePath === '/work/frontend')
+  assert.equal(beWk?.title, 'backend / develop')
+  assert.equal(feWk?.title, 'frontend / develop')
+
+  // Clicking remote Bot resolves runtime-prefixed workspace.list id via suffix/name/path
+  const jumpBot = await worker.request('hq.openSession', {
+    workspaceId: 'folder:copilot-1',
+    workspacePath: '/Users/dev/.orca/bots/orion-copilot',
+    botName: 'Orion Copilot',
+    host: 'hub-mac'
+  })
+  assert.equal(jumpBot.opened, true)
+  assert.equal(openedIds[0], 'runtime:env-hub:folder:copilot-1')
+
+  // Clicking remote worker resolves runtime-prefixed workspace.list id via path
+  const jumpWk = await worker.request('hq.openSession', {
+    workspaceId: 'repo-be::/work/backend',
+    workspacePath: '/work/backend',
+    host: 'hub-mac'
+  })
+  assert.equal(jumpWk.opened, true)
+  assert.equal(openedIds[1], 'runtime:env-hub:repo-be::/work/backend')
+
+  await worker.deactivate()
+})

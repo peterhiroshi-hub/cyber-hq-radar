@@ -577,7 +577,16 @@ const server = http.createServer((req, res) => {
             res.end('{"ok":false,"error":"invalid_params"}')
             return
           }
-          const act = await runOrcaJson(['worktree', 'activate', '--environment', host, '--worktree', selector, '--json'], 8000)
+          if (selector.startsWith('folder:') || selector.startsWith('id:folder:')) {
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end('{"ok":false,"activated":false,"error":"folder_not_supported_via_cli"}')
+            return
+          }
+          const isSelfHost = host === 'local' || host.toLowerCase() === ENV_HINT.toLowerCase()
+          const cliArgs = isSelfHost
+            ? ['worktree', 'activate', '--worktree', selector, '--json']
+            : ['worktree', 'activate', '--environment', host, '--worktree', selector, '--json']
+          const act = await runOrcaJson(cliArgs, 8000)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ ok: Boolean(act), activated: Boolean(act && act.activated !== false) }))
         })
