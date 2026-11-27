@@ -121,6 +121,28 @@
   .kpi-chip .kv { font-size: 10.5px; font-weight: 800; color: var(--cyan); }
   .kpi-chip.ok .kv { color: var(--emerald); text-shadow: 0 0 8px rgba(0, 255, 157, 0.35); }
   .kpi-chip.hot .kv { color: var(--magenta); text-shadow: 0 0 8px rgba(255, 42, 133, 0.45); }
+  button.kpi-chip.need-btn {
+    cursor: pointer;
+    border-color: rgba(255, 184, 0, 0.30);
+    transition: all 0.16s ease;
+  }
+  button.kpi-chip.need-btn .kv { color: var(--amber); }
+  button.kpi-chip.need-btn:hover {
+    border-color: var(--amber);
+    background: rgba(255, 184, 0, 0.16);
+    box-shadow: 0 0 12px rgba(255, 184, 0, 0.35);
+  }
+  button.kpi-chip.need-btn.alert {
+    border-color: rgba(255, 132, 36, 0.92);
+    background: linear-gradient(135deg, rgba(255, 184, 0, 0.24), rgba(255, 76, 48, 0.20));
+    animation: needPulse 1.6s infinite ease-in-out;
+  }
+  button.kpi-chip.need-btn.alert .kl { color: #ffd98a; font-weight: 800; }
+  button.kpi-chip.need-btn.alert .kv { color: #ffe380; text-shadow: 0 0 10px rgba(255, 184, 0, 0.85); }
+  @keyframes needPulse {
+    0%, 100% { box-shadow: 0 0 8px rgba(255, 184, 0, 0.32), inset 0 0 6px rgba(255, 120, 40, 0.14); }
+    50% { box-shadow: 0 0 18px rgba(255, 140, 20, 0.72), inset 0 0 10px rgba(255, 184, 0, 0.30); }
+  }
 
   button.cyber-btn {
     background: rgba(0, 240, 255, 0.09); color: var(--cyan);
@@ -198,7 +220,10 @@
   body.wall-mode .bot-node { padding: 3px 9px 3px 7px; }
   body.wall-mode .bot-label { font-size: 10.5px; }
   body.wall-mode .bot-task { font-size: 8.5px; margin-top: 1px; line-height: 1.2; }
-  body.wall-mode .bot-node:not(.working):not(.unread) .bot-task { display: none; }
+  body.wall-mode .bot-node:not(.working):not(.unread):not(.needs-you) .bot-task { display: none; }
+  body.wall-mode .needs-you-bar { padding: 3px 7px; margin-bottom: 4px; gap: 6px; }
+  body.wall-mode .ny-pill { padding: 2px 6px; font-size: 8.5px; max-width: 340px; }
+  body.wall-mode .ny-queue-btn { font-size: 8px; padding: 1.5px 6px; }
   body.wall-mode .route-tag { font-size: 8px; padding: 0.5px 4.5px; }
   body.wall-mode .mesh-lane { min-height: 360px; }
   body.wall-mode .compute-bay { gap: 4px; justify-content: flex-start; }
@@ -404,6 +429,11 @@
     border-color: rgba(255, 184, 0, 0.62);
     box-shadow: 0 0 8px rgba(255, 184, 0, 0.14);
   }
+  .bot-node.needs-you {
+    border-color: rgba(255, 184, 0, 0.94);
+    background: linear-gradient(135deg, rgba(255, 184, 0, 0.16), rgba(255, 76, 48, 0.08), rgba(9, 17, 35, 0.94));
+    animation: needPulse 1.7s infinite ease-in-out;
+  }
   @keyframes hotBorder {
     0%, 100% { box-shadow: 0 0 10px rgba(255, 42, 133, 0.24), inset 0 0 8px rgba(255, 42, 133, 0.10); }
     50% { box-shadow: 0 0 18px rgba(255, 42, 133, 0.45), inset 0 0 12px rgba(255, 42, 133, 0.20); }
@@ -428,6 +458,11 @@
     animation: beacon 0.85s infinite;
   }
   .led.unread { background: var(--amber); box-shadow: 0 0 7px var(--amber); }
+  .led.need {
+    background: var(--amber);
+    box-shadow: 0 0 8px var(--amber), 0 0 15px rgba(255, 120, 40, 0.85);
+    animation: beacon 0.8s infinite;
+  }
 
   .bot-label {
     font-size: 9.8px; font-weight: 700; color: var(--text);
@@ -493,6 +528,132 @@
   body.wall-mode .mix-bar { height: 6.5px; }
   body.wall-mode .mix-chip { font-size: 8.5px; padding: 1px 5.5px; gap: 3px; }
 
+  /* Dynamic Action Required // Needs You Alert Strip */
+  .needs-you-bar {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 8px;
+    margin-bottom: 6px;
+    border-radius: 5px;
+    background: linear-gradient(90deg, rgba(255, 184, 0, 0.16), rgba(255, 76, 48, 0.12), rgba(10, 18, 36, 0.92));
+    border: 1px solid rgba(255, 152, 24, 0.72);
+    box-shadow: 0 0 14px rgba(255, 152, 24, 0.18), inset 0 0 12px rgba(255, 184, 0, 0.08);
+    font-family: var(--mono);
+    flex-wrap: nowrap;
+    overflow: hidden;
+  }
+  .ny-head {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+  }
+  .ny-tag {
+    font-size: 8.2px;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    color: #ffd975;
+    text-shadow: 0 0 8px rgba(255, 184, 0, 0.55);
+    white-space: nowrap;
+  }
+  .ny-queue-btn {
+    background: rgba(255, 184, 0, 0.16);
+    color: #ffe38e;
+    border: 1px solid rgba(255, 184, 0, 0.65);
+    border-radius: 4px;
+    padding: 1.5px 6px;
+    font-family: var(--mono);
+    font-size: 7.8px;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: all 0.15s ease;
+  }
+  .ny-queue-btn:hover {
+    background: rgba(255, 184, 0, 0.30);
+    box-shadow: 0 0 10px rgba(255, 184, 0, 0.45);
+  }
+  .ny-pills {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .ny-pills::-webkit-scrollbar { display: none; }
+  .ny-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2.5px 7px;
+    border-radius: 4px;
+    background: rgba(14, 20, 38, 0.92);
+    border: 1px solid rgba(255, 168, 36, 0.55);
+    color: #fff3d1;
+    font-size: 8.2px;
+    cursor: pointer;
+    flex-shrink: 0;
+    max-width: 380px;
+    transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+  }
+  .ny-pill:hover {
+    border-color: #ffe28a;
+    background: rgba(255, 184, 0, 0.20);
+    box-shadow: 0 0 10px rgba(255, 184, 0, 0.36);
+  }
+  .ny-num {
+    color: #081220;
+    background: var(--amber);
+    padding: 0 3.5px;
+    border-radius: 2.5px;
+    font-weight: 800;
+    font-size: 7.4px;
+    flex-shrink: 0;
+  }
+  .ny-num.perm {
+    background: #ff6b4a;
+    color: #fff;
+  }
+  .ny-bot {
+    color: #ffd46b;
+    font-weight: 800;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .ny-host {
+    color: #9bb7d9;
+    font-weight: 700;
+    font-size: 7.5px;
+    flex-shrink: 0;
+  }
+  .ny-q {
+    color: #e9f6ff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .ny-opts {
+    color: #ffb800;
+    border: 1px solid rgba(255, 184, 0, 0.45);
+    border-radius: 3px;
+    padding: 0 3px;
+    font-size: 7.2px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  .ny-jump {
+    color: #ffd975;
+    font-weight: 800;
+    flex-shrink: 0;
+  }
+
   .route-tag {
     font-family: var(--mono); font-size: 7.5px; font-weight: 700;
     padding: 0.5px 3.5px; border-radius: 3px; flex-shrink: 0;
@@ -503,6 +664,13 @@
   .route-tag.gpu { color: var(--amber); border-color: rgba(255, 184, 0, 0.45); background: rgba(255, 184, 0, 0.1); }
   .route-tag.qa { color: var(--violet); border-color: rgba(167, 123, 255, 0.45); background: rgba(167, 123, 255, 0.12); }
   .route-tag.live { color: var(--magenta); border-color: rgba(255, 42, 133, 0.65); background: rgba(255, 42, 133, 0.16); }
+  .route-tag.need {
+    color: #081220;
+    background: linear-gradient(90deg, #ffb800, #ff7b47);
+    border-color: #ffe28a;
+    box-shadow: 0 0 8px rgba(255, 184, 0, 0.52);
+    font-weight: 800;
+  }
 
   .bot-task {
     margin-top: 2px;
@@ -514,6 +682,7 @@
     text-overflow: ellipsis;
   }
   .bot-task.live { color: #ff8bc0; }
+  .bot-task.need { color: #ffd975; font-weight: 700; }
   .bot-task .tool-chip {
     display: inline-block;
     color: #04101c;
@@ -540,6 +709,11 @@
     background: var(--magenta);
     border-color: #fff;
     box-shadow: 0 0 8px var(--magenta);
+  }
+  .bot-node.needs-you .port-out {
+    background: var(--amber);
+    border-color: #fff;
+    box-shadow: 0 0 9px var(--amber);
   }
 
   /* CENTER CORRIDOR: OPEN TAILSCALE RADAR ARENA */
@@ -640,6 +814,7 @@
   .pill.on { color: var(--emerald); }
   .pill.off { color: var(--magenta); }
   .pill.work { color: #fff; background: rgba(255, 42, 133, 0.85); border-color: var(--magenta); box-shadow: 0 0 8px rgba(255, 42, 133, 0.55); }
+  .pill.perm { color: #081220; background: var(--amber); border-color: #ffe28a; box-shadow: 0 0 8px rgba(255, 184, 0, 0.60); }
   .pill.done { color: var(--emerald); background: rgba(0, 255, 157, 0.1); border-color: rgba(0, 255, 157, 0.45); }
   .pill.idle { color: var(--cyan); border-color: rgba(0, 240, 255, 0.35); }
 
@@ -745,6 +920,16 @@
   }
   .spark-svg { width: 100%; height: 15px; display: block; overflow: visible; }
   .worker-slot.succeeded { border-left-color: var(--emerald); }
+  .worker-slot.permission {
+    border-left-color: var(--amber);
+    border-color: rgba(255, 184, 0, 0.72);
+    background: linear-gradient(90deg, rgba(255, 184, 0, 0.15), rgba(9, 18, 37, 0.95));
+  }
+  .worker-slot.permission .w-port-in {
+    background: var(--amber);
+    border-color: #fff;
+    box-shadow: 0 0 9px var(--amber);
+  }
   .worker-slot.dim { opacity: 0.34; }
   .worker-slot.hi { opacity: 1; border-color: #fff; box-shadow: 0 0 12px rgba(0, 240, 255, 0.45); }
 
@@ -848,6 +1033,7 @@
       </div>
     </div>
     <div class="top-right">
+      <button class="kpi-chip need-btn" id="kpiNeedsChip" title="Items &amp; approvals needing your decision — click to jump"><span class="kl">NEED ME</span><span class="kv" id="kpiNeedsYou">0</span></button>
       <span class="kpi-chip"><span class="kl">BOTS</span><span class="kv" id="kpiBots">-</span></span>
       <span class="kpi-chip ok"><span class="kl">NODES</span><span class="kv" id="kpiHosts">-</span></span>
       <span class="kpi-chip hot"><span class="kl">ACTIVE</span><span class="kv" id="kpiActive">-</span></span>
@@ -864,9 +1050,9 @@
     <div class="deck-head">
       <span><b>// LIVE TEAM TOPOLOGY</b> · BOT BRAINS → TAILSCALE → MACHINES &amp; WORKERS</span>
       <div class="legend">
+        <span class="lg"><span class="lg-dot" style="background:var(--amber);box-shadow:0 0 6px var(--amber)"></span>NEED ME</span>
         <span class="lg"><span class="lg-dot" style="background:var(--magenta);box-shadow:0 0 6px var(--magenta)"></span>WORKING</span>
         <span class="lg"><span class="lg-dot" style="background:var(--emerald)"></span>DONE</span>
-        <span class="lg"><span class="lg-dot" style="background:var(--amber)"></span>UNREAD</span>
       </div>
     </div>
 
@@ -875,6 +1061,8 @@
       <div class="mix-bar" id="mixBar"></div>
       <div class="mix-chips" id="mixChips"></div>
     </div>
+
+    <div class="needs-you-bar" id="needsYouBar" style="display:none"></div>
 
     <div class="deck-grid" id="deckGrid">
       <div class="brain-bay" id="brainBay"></div>
@@ -923,6 +1111,8 @@
     const routeMap = {
       'hq.refresh': '/api/refresh',
       'hq.openSession': '/api/open-session',
+      'hq.openNeedsYou': '/api/open-needs-you',
+      'hq.openTasksView': '/api/open-tasks-view',
       'hq.saveVideo': '/api/save-video'
     };
     const ep = routeMap[name];
@@ -970,6 +1160,9 @@
   const scanBtn = document.getElementById('scanBtn');
   const recBtn = document.getElementById('recBtn');
   const fsBtn = document.getElementById('fsBtn');
+  const kpiNeedsChip = document.getElementById('kpiNeedsChip');
+  const kpiNeedsYou = document.getElementById('kpiNeedsYou');
+  const needsYouBar = document.getElementById('needsYouBar');
   const canvas = document.getElementById('meshCanvas');
   const ctx = canvas.getContext('2d');
 
@@ -1241,6 +1434,9 @@
   }
 
   function routeBadgeForBot(b) {
+    if ((b.needsYouCount || 0) > 0) {
+      return { text: b.needsYouCount > 1 ? ('! ' + b.needsYouCount + ' NEED ME') : '! NEED ME', cls: 'need' };
+    }
     if (b.state === 'working') return { text: b.activeDispatchCount > 0 ? (b.activeDispatchCount + 'W LIVE') : 'LIVE', cls: 'live' };
     const ownHostId = b.botHost || snap?.controlHostId || 'local';
     const target = snap?.hosts?.find((h) => h.id === b.primaryHost);
@@ -1303,18 +1499,66 @@
     }));
   }
 
+  function renderNeedsYouBar(data) {
+    if (!needsYouBar) return;
+    const list = Array.isArray(data?.needsYou) ? data.needsYou : [];
+    if (list.length === 0) {
+      needsYouBar.style.display = 'none';
+      needsYouBar.innerHTML = '';
+      return;
+    }
+    needsYouBar.style.display = 'flex';
+    const pillsHtml = list.map((it, idx) => {
+      const matchedBot = (data.bots || []).find((b) => b.name === it.bot);
+      const botLbl = matchedBot?.shortName || it.bot || 'Bot';
+      const hostLbl = hostShort(it.host || 'local');
+      const isPerm = it.kind === 'permission';
+      const numTag = isPerm ? 'PERM' : (it.number != null ? ('#' + it.number) : 'ITEM');
+      const promptTxt = it.question || it.title || 'Needs your decision';
+      const optsHtml = it.replyCount > 0 ? ('<span class="ny-opts">' + it.replyCount + ' opts</span>') : '';
+      return '<div class="ny-pill" data-ny-idx="' + idx + '" ' +
+        'data-bot-name="' + escapeHtml(it.bot || '') + '" ' +
+        'data-host="' + escapeHtml(it.host || 'local') + '" ' +
+        'data-ws="' + escapeHtml(it.workspaceId || '') + '" ' +
+        'data-wpath="' + escapeHtml(it.workspacePath || '') + '" ' +
+        'data-chat-title="' + escapeHtml(it.chatTitle || '') + '" ' +
+        'data-term="' + escapeHtml(it.terminalId || '') + '" ' +
+        'data-num="' + escapeHtml(it.number != null ? String(it.number) : '') + '" ' +
+        'data-kind="' + escapeHtml(it.kind || 'item') + '" ' +
+        'title="' + escapeHtml(promptTxt + ' — click to jump') + '">' +
+        '<span class="ny-num ' + (isPerm ? 'perm' : '') + '">' + escapeHtml(numTag) + '</span>' +
+        '<span class="ny-bot">' + escapeHtml(botLbl) + '</span>' +
+        '<span class="ny-host">@' + escapeHtml(hostLbl) + '</span>' +
+        '<span class="ny-q">' + escapeHtml(promptTxt) + '</span>' +
+        optsHtml +
+        '<span class="ny-jump">JUMP ↗</span>' +
+      '</div>';
+    }).join('');
+
+    needsYouBar.innerHTML =
+      '<div class="ny-head">' +
+        '<span class="ny-tag">● ACTION REQUIRED (' + list.length + ')</span>' +
+        '<button class="ny-queue-btn" id="nyQueueBtn" title="Open Orca Tasks / Needs You queue">OPEN QUEUE ↗</button>' +
+      '</div>' +
+      '<div class="ny-pills">' + pillsHtml + '</div>';
+  }
+
   function renderBotCard(b) {
+    const hasNeedsYou = (b.needsYouCount || 0) > 0;
     const cls = [
       'bot-node',
       b.squad === 'command' ? 'command' : '',
+      hasNeedsYou ? 'needs-you' : '',
       b.state === 'working' ? 'working' : b.state === 'unread' ? 'unread' : ''
     ].filter(Boolean).join(' ');
-    const ledCls = b.state === 'working' ? 'working' : b.state === 'unread' ? 'unread' : '';
+    const ledCls = hasNeedsYou ? 'need' : b.state === 'working' ? 'working' : b.state === 'unread' ? 'unread' : '';
     const rt = routeBadgeForBot(b);
-    const ag = formatAgentBadge(b.agent);
 
     let taskLine = '';
-    if (b.state === 'working' || b.activeSessionTitle) {
+    if (hasNeedsYou) {
+      const nyTxt = '[! NEED ME] ' + (b.needsYouSummary || 'Needs your decision');
+      taskLine = '<div class="bot-task need" title="' + escapeHtml(nyTxt) + '">' + escapeHtml(nyTxt) + '</div>';
+    } else if (b.state === 'working' || b.activeSessionTitle) {
       const toolHtml = b.activeToolName ? '<span class="tool-chip">' + escapeHtml(b.activeToolName) + '</span>' : '';
       const txt = b.activeSessionTitle || (b.activeDispatchCount > 0 ? ('Running ' + b.activeDispatchCount + ' worker(s)') : 'Active session');
       taskLine = '<div class="bot-task ' + (b.state === 'working' ? 'live' : '') + '" title="' + escapeHtml(txt) + '">' +
@@ -1337,7 +1581,8 @@
   }
 
   function renderWorkerSlot(w) {
-    const pillCls = w.state === 'working' ? 'work' : w.state === 'succeeded' ? 'done' : 'idle';
+    const pillCls = w.state === 'working' ? 'work' : w.state === 'permission' ? 'perm' : w.state === 'succeeded' ? 'done' : 'idle';
+    const stateLbl = w.state === 'permission' ? 'NEED YOU' : w.state.toUpperCase();
     const matchedBot = w.bot ? snap?.bots?.find((b) => b.name === w.bot) : null;
     const viaBot = w.bot ? ('via ' + (matchedBot?.shortName || w.bot)) : ('@ ' + hostShort(w.host));
     const taskTxt = w.sessionTitle || (w.branch ? ('branch: ' + w.branch) : w.workspacePath);
@@ -1355,7 +1600,7 @@
       '<span class="w-port-in"></span>' +
       '<div class="ws-top">' +
         '<span class="ws-title" title="' + escapeHtml(w.title) + '">' + escapeHtml(w.title) + '</span>' +
-        '<span class="pill ' + pillCls + '">' + escapeHtml(w.state.toUpperCase()) + '</span>' +
+        '<span class="pill ' + pillCls + '">' + escapeHtml(stateLbl) + '</span>' +
       '</div>' +
       '<div class="ws-sub">' +
         '<span class="ws-via">' + escapeHtml(viaBot) + '</span>' +
@@ -1370,18 +1615,25 @@
 
   function renderDom(data) {
     if (!data) return;
+    const nyList = Array.isArray(data.needsYou) ? data.needsYou : [];
+    const nyCount = typeof data.summary?.needsYouCount === 'number' ? data.summary.needsYouCount : nyList.length;
     document.getElementById('clockLine').textContent = 'LIVE SWEEP ' + fmtTime(data.generatedAt) + ' · TAILSCALE MESH';
     document.getElementById('kpiBots').textContent = data.summary.workingBots + '/' + data.summary.totalBots;
     document.getElementById('kpiHosts').textContent = data.summary.onlineHosts + '/' + data.hosts.length;
     document.getElementById('kpiActive').textContent = String(data.summary.activeWorkers);
+    if (kpiNeedsYou) kpiNeedsYou.textContent = String(nyCount);
+    if (kpiNeedsChip) kpiNeedsChip.classList.toggle('alert', nyCount > 0);
     document.getElementById('workerCountHint').textContent = data.workers.length + ' WORKERS TRACKED';
     document.getElementById('meshStatusPill').textContent =
-      data.summary.activeWorkers > 0 ? (data.summary.activeWorkers + ' LIVE FLOWS') : 'MESH READY';
+      nyCount > 0
+        ? ('! ' + nyCount + ' NEED YOU')
+        : (data.summary.activeWorkers > 0 ? (data.summary.activeWorkers + ' LIVE FLOWS') : 'MESH READY');
 
-    const sig = JSON.stringify({ h: data.hosts, b: data.bots, w: data.workers, e: (data.events || []).slice(0, 6) });
+    const sig = JSON.stringify({ h: data.hosts, b: data.bots, w: data.workers, ny: nyList, e: (data.events || []).slice(0, 6) });
     if (sig === lastRenderSig) return;
     lastRenderSig = sig;
     renderModelMixChart(data);
+    renderNeedsYouBar(data);
 
     // Left Bay: All Bots explicitly grouped by squad with per-host ownership badge
     const groups = orderBotGroups(data.bots || []);
@@ -1493,7 +1745,7 @@
         }
       }
       c.highlighted = hi;
-      if (c.kind === 'worker-live' || c.kind === 'bot-live' || (hi && c.kind !== 'history')) {
+      if (c.kind === 'worker-live' || c.kind === 'bot-live' || c.kind === 'needs-you' || (hi && c.kind !== 'history')) {
         liveList.push(c);
       } else if (hi && c.kind === 'history') {
         hiHistoryList.push(c);
@@ -1548,6 +1800,7 @@
       inspectorText.innerHTML = '<b>[BOT]</b> ' + escapeHtml(f.botName || '') +
         ' · Engine <b style="color:' + ag.color + '">' + escapeHtml(ag.label) + '</b>' +
         routeHtml +
+        ((b?.needsYouCount || 0) > 0 ? (' · <b style="color:var(--amber)">[! NEED ME] ' + escapeHtml(b.needsYouSummary || 'Needs decision') + '</b>') : '') +
         (b?.activeSessionTitle ? (' · Active: ' + escapeHtml(b.activeSessionTitle)) : '') + lockTag;
       return;
     }
@@ -1618,6 +1871,14 @@
 
   function resolveTargetFocus(target) {
     if (!target || !target.closest) return null;
+    const nyEl = target.closest('.ny-pill');
+    if (nyEl) {
+      const bName = nyEl.getAttribute('data-bot-name') || '';
+      const hId = nyEl.getAttribute('data-host') || 'local';
+      const b = bName ? snap?.bots?.find((x) => x.name === bName) : null;
+      if (b) return { kind: 'bot', id: b.id || bName, botName: b.name, hostId: b.primaryHost || hId };
+      return { kind: 'host', id: hId, hostId: hId };
+    }
     const wEl = target.closest('.worker-slot');
     if (wEl) {
       const wId = wEl.getAttribute('data-worker-id');
@@ -1652,10 +1913,73 @@
     if (!pinned) applyHoverClasses();
   });
 
+  async function jumpToNeedsYou(payload, label) {
+    showToast('JUMPING → ' + String(label || 'Needs You').slice(0, 26) + '...');
+    try {
+      const res = await apiRequest('hq.openNeedsYou', payload);
+      showToast(res?.opened ? ('✓ ' + (res.detail || 'Opened')) : ('! ' + (res?.detail || 'Unable to jump')));
+    } catch {
+      showToast('! Jump failed');
+    }
+  }
+
+  async function jumpToTasksQueue() {
+    showToast('OPENING → Orca Tasks / Needs You queue...');
+    try {
+      const res = await apiRequest('hq.openTasksView');
+      showToast(res?.opened ? ('✓ ' + (res.detail || 'Opened Orca Tasks / Needs You queue')) : ('! ' + (res?.detail || 'Unable to open Tasks queue')));
+    } catch {
+      showToast('! Failed to open Tasks queue');
+    }
+  }
+
+  if (kpiNeedsChip) {
+    kpiNeedsChip.addEventListener('click', () => {
+      const list = Array.isArray(snap?.needsYou) ? snap.needsYou : [];
+      if (list.length === 1) {
+        const it = list[0];
+        void jumpToNeedsYou({
+          host: it.host || 'local',
+          botName: it.bot || null,
+          workspaceId: it.workspaceId || null,
+          workspacePath: it.workspacePath || null,
+          chatTitle: it.chatTitle || null,
+          terminalId: it.terminalId || null,
+          itemNumber: it.number ?? null,
+          kind: it.kind || 'item'
+        }, it.bot || it.title);
+      } else {
+        void jumpToTasksQueue();
+      }
+    });
+  }
+
   // Global click handler: clicking any blank area cancels selection; clicking a Host toggles pin
   document.addEventListener('click', async (ev) => {
     const target = ev.target;
+    const queueBtn = target && target.closest ? target.closest('.ny-queue-btn') : null;
+    if (queueBtn) {
+      await jumpToTasksQueue();
+      return;
+    }
     if (target && target.closest && target.closest('button')) return;
+
+    const nyEl = target && target.closest ? target.closest('.ny-pill') : null;
+    if (nyEl) {
+      const numRaw = nyEl.getAttribute('data-num');
+      const bName = nyEl.getAttribute('data-bot-name') || null;
+      await jumpToNeedsYou({
+        host: nyEl.getAttribute('data-host') || 'local',
+        botName: bName,
+        workspaceId: nyEl.getAttribute('data-ws') || null,
+        workspacePath: nyEl.getAttribute('data-wpath') || null,
+        chatTitle: nyEl.getAttribute('data-chat-title') || null,
+        terminalId: nyEl.getAttribute('data-term') || null,
+        itemNumber: numRaw ? Number(numRaw) : null,
+        kind: nyEl.getAttribute('data-kind') || 'item'
+      }, bName || 'Needs You');
+      return;
+    }
 
     const wEl = target && target.closest ? target.closest('.worker-slot') : null;
     if (wEl) {
@@ -1686,6 +2010,20 @@
       const ws = bEl.getAttribute('data-ws') || null;
       const wpath = bEl.getAttribute('data-wpath') || null;
       const host = bEl.getAttribute('data-host') || 'local';
+      if (bEl.classList.contains('needs-you')) {
+        const nyItem = (snap?.needsYou || []).find((x) => x.bot === bName) || null;
+        await jumpToNeedsYou({
+          host: nyItem?.host || host,
+          botName: bName,
+          workspaceId: nyItem?.workspaceId || ws,
+          workspacePath: nyItem?.workspacePath || wpath,
+          chatTitle: nyItem?.chatTitle || null,
+          terminalId: nyItem?.terminalId || null,
+          itemNumber: nyItem?.number ?? null,
+          kind: nyItem?.kind || 'item'
+        }, bName);
+        return;
+      }
       showToast('OPENING → ' + bName + '...');
       try {
         const res = await apiRequest('hq.openSession', {
@@ -1795,9 +2133,14 @@
           let kind = 'standby';
           let color = squadColor(b.squad);
           if (isOwnHost) {
-            const isBotLive = b.state === 'working';
-            kind = isBotLive ? 'bot-live' : 'standby';
-            color = isBotLive ? '#ff2a85' : squadColor(b.squad);
+            if ((b.needsYouCount || 0) > 0) {
+              kind = 'needs-you';
+              color = '#ffb800';
+            } else {
+              const isBotLive = b.state === 'working';
+              kind = isBotLive ? 'bot-live' : 'standby';
+              color = isBotLive ? '#ff2a85' : squadColor(b.squad);
+            }
           } else if (activeSet.has(tHost)) {
             kind = 'bot-live';
             color = '#ff2a85';
@@ -1827,12 +2170,13 @@
         const src = botPorts.get(botName);
         if (!src) continue;
         const isWorking = wk.state === 'working';
+        const isPerm = wk.state === 'permission';
         const dx = Math.max(36, Math.abs(dst.x - src.x) * 0.52);
         conduits.push({
           src, dst,
           c1x: src.x + dx, c1y: src.y, c2x: dst.x - dx, c2y: dst.y,
-          color: isWorking ? '#ff2a85' : wk.state === 'succeeded' ? '#00ff9d' : squadColor(wk.squad),
-          kind: isWorking ? 'worker-live' : 'worker-recent',
+          color: isPerm ? '#ffb800' : isWorking ? '#ff2a85' : wk.state === 'succeeded' ? '#00ff9d' : squadColor(wk.squad),
+          kind: isPerm ? 'needs-you' : isWorking ? 'worker-live' : 'worker-recent',
           isWorker: true,
           workerId: wk.id,
           highlighted: false,
@@ -1842,7 +2186,7 @@
       }
     }
 
-    const layerOrder = { standby: 0, history: 1, 'worker-recent': 2, 'bot-live': 3, 'worker-live': 4 };
+    const layerOrder = { standby: 0, history: 1, 'worker-recent': 2, 'needs-you': 3, 'bot-live': 3, 'worker-live': 4 };
     conduits.sort((a, b) => (layerOrder[a.kind] || 0) - (layerOrder[b.kind] || 0));
     cachedConduits = conduits;
     cachedRecentConduits = conduits.filter((c) => c.kind === 'worker-recent');
@@ -1973,7 +2317,7 @@
     const hasFocus = Boolean(activeFocus());
     for (let i = 0; i < cachedConduits.length; i++) {
       const c = cachedConduits[i];
-      const isLive = c.kind === 'worker-live' || c.kind === 'bot-live';
+      const isLive = c.kind === 'worker-live' || c.kind === 'bot-live' || c.kind === 'needs-you';
       const isHistory = c.kind === 'history';
       const dimmed = hasFocus && !c.highlighted;
       let alpha =
@@ -2486,9 +2830,14 @@
           let kind = 'standby';
           let color = squadColor(b.squad);
           if (isOwnHost) {
-            const isBotLive = b.state === 'working';
-            kind = isBotLive ? 'bot-live' : 'standby';
-            color = isBotLive ? '#ff2a85' : squadColor(b.squad);
+            if ((b.needsYouCount || 0) > 0) {
+              kind = 'needs-you';
+              color = '#ffb800';
+            } else {
+              const isBotLive = b.state === 'working';
+              kind = isBotLive ? 'bot-live' : 'standby';
+              color = isBotLive ? '#ff2a85' : squadColor(b.squad);
+            }
           } else if (activeSet.has(th)) {
             kind = 'bot-live';
             color = '#ff2a85';
@@ -2511,8 +2860,8 @@
         if (!sb) continue;
         cinemaConduits.push({
           src: sb.portOut, dst: wb.portIn,
-          color: w.state === 'working' ? '#ff2a85' : w.state === 'succeeded' ? '#00ff9d' : squadColor(w.squad),
-          kind: w.state === 'working' ? 'worker-live' : 'worker-recent'
+          color: w.state === 'permission' ? '#ffb800' : w.state === 'working' ? '#ff2a85' : w.state === 'succeeded' ? '#00ff9d' : squadColor(w.squad),
+          kind: w.state === 'permission' ? 'needs-you' : w.state === 'working' ? 'worker-live' : 'worker-recent'
         });
       }
 
@@ -2592,25 +2941,31 @@
 
         // Right KPI chips + REC timecode
         const recBlink = Math.floor(tSec * 2) % 2 === 0;
+        const cinNyCount = typeof data.summary?.needsYouCount === 'number'
+          ? data.summary.needsYouCount
+          : (Array.isArray(data.needsYou) ? data.needsYou.length : 0);
         const kpis = [
-          { l: 'BOTS', v: data.summary.workingBots + '/' + data.summary.totalBots, col: '#00f0ff' },
-          { l: 'NODES', v: data.summary.onlineHosts + '/' + data.hosts.length, col: '#00ff9d' },
-          { l: 'ACTIVE', v: String(data.summary.activeWorkers), col: '#ff2a85' }
+          ...(cinNyCount > 0 ? [{ l: 'NEED ME', v: '! ' + cinNyCount, col: '#ffb800', alert: true }] : []),
+          { l: 'BOTS', v: data.summary.workingBots + '/' + data.summary.totalBots, col: '#00f0ff', alert: false },
+          { l: 'NODES', v: data.summary.onlineHosts + '/' + data.hosts.length, col: '#00ff9d', alert: false },
+          { l: 'ACTIVE', v: String(data.summary.activeWorkers), col: '#ff2a85', alert: false }
         ];
-        let kx = 1320;
+        const kpiW = kpis.length > 3 ? 124 : 126;
+        const kpiStep = kpis.length > 3 ? 134 : 138;
+        let kx = kpis.length > 3 ? 1196 : 1320;
         for (const kp of kpis) {
-          roundRect(c, kx, 31, 126, 44, 8);
-          c.fillStyle = 'rgba(11, 22, 46, 0.95)';
+          roundRect(c, kx, 31, kpiW, 44, 8);
+          c.fillStyle = kp.alert ? 'rgba(255, 184, 0, 0.18)' : 'rgba(11, 22, 46, 0.95)';
           c.fill();
-          c.strokeStyle = 'rgba(0, 240, 255, 0.25)';
+          c.strokeStyle = kp.alert ? '#ffb800' : 'rgba(0, 240, 255, 0.25)';
           c.stroke();
-          c.fillStyle = '#7b95b8';
+          c.fillStyle = kp.alert ? '#ffd975' : '#7b95b8';
           c.font = '11px ui-monospace, Menlo, monospace';
           c.fillText(kp.l, kx + 12, 49);
           c.fillStyle = kp.col;
           c.font = 'bold 18px ui-monospace, Menlo, monospace';
           c.fillText(kp.v, kx + 12, 68);
-          kx += 138;
+          kx += kpiStep;
         }
         // REC timecode badge
         roundRect(c, 1742, 31, 124, 44, 8);
@@ -2747,10 +3102,10 @@
         c.restore();
 
         // Draw Conduits
-        const orderMap = { standby: 0, history: 1, 'worker-recent': 2, 'bot-live': 3, 'worker-live': 4 };
+        const orderMap = { standby: 0, history: 1, 'worker-recent': 2, 'needs-you': 3, 'bot-live': 3, 'worker-live': 4 };
         const sortedC = [...cinemaConduits].sort((a, b) => (orderMap[a.kind] || 0) - (orderMap[b.kind] || 0));
         for (const cd of sortedC) {
-          const isLive = cd.kind === 'worker-live' || cd.kind === 'bot-live';
+          const isLive = cd.kind === 'worker-live' || cd.kind === 'bot-live' || cd.kind === 'needs-you';
           const isHistory = cd.kind === 'history';
           const dx = Math.max(120, Math.abs(cd.dst.x - cd.src.x) * 0.48);
           c.save();
@@ -2768,7 +3123,7 @@
         }
 
         // Cinema Packets + Comet Trails + Ripples
-        const liveC = sortedC.filter((x) => x.kind === 'worker-live' || x.kind === 'bot-live');
+        const liveC = sortedC.filter((x) => x.kind === 'worker-live' || x.kind === 'bot-live' || x.kind === 'needs-you');
         const recC = sortedC.filter((x) => x.kind === 'worker-recent');
         if (liveC.length && frameIdx % 4 === 0) {
           const pick = liveC[(frameIdx / 4) % liveC.length | 0];
@@ -2858,14 +3213,15 @@
 
         for (const box of botBoxes.values()) {
           const b = box.bot;
+          const isNeed = (b.needsYouCount || 0) > 0;
           const isW = b.state === 'working';
           const isU = b.state === 'unread';
           const compactRow = box.h < 42;
           roundRect(c, box.x, box.y, box.w, box.h, 7);
-          c.fillStyle = isW ? 'rgba(255, 42, 133, 0.14)' : 'rgba(10, 19, 39, 0.94)';
+          c.fillStyle = isNeed ? 'rgba(255, 184, 0, 0.16)' : isW ? 'rgba(255, 42, 133, 0.14)' : 'rgba(10, 19, 39, 0.94)';
           c.fill();
-          c.strokeStyle = isW ? '#ff2a85' : isU ? '#ffb800' : b.squad === 'command' ? '#00f0ff' : 'rgba(120, 144, 178, 0.28)';
-          c.lineWidth = isW ? 2 : 1.1;
+          c.strokeStyle = isNeed ? '#ffb800' : isW ? '#ff2a85' : isU ? '#ffb800' : b.squad === 'command' ? '#00f0ff' : 'rgba(120, 144, 178, 0.28)';
+          c.lineWidth = (isNeed || isW) ? 2 : 1.1;
           c.stroke();
 
           if (isW) {
@@ -2885,7 +3241,7 @@
           const topY = compactRow ? (box.y + box.h / 2) : (box.y + 17);
           c.beginPath();
           c.arc(box.x + 15, topY, 4.2, 0, Math.PI * 2);
-          c.fillStyle = isW ? '#ff2a85' : isU ? '#ffb800' : '#00f0ff';
+          c.fillStyle = isNeed ? '#ffb800' : isW ? '#ff2a85' : isU ? '#ffb800' : '#00f0ff';
           c.fill();
 
           c.fillStyle = '#eef7ff';
@@ -2895,17 +3251,19 @@
 
           const ag = formatAgentBadge(b.agent);
           const rt = routeBadgeForBot(b);
-          c.fillStyle = isW ? '#ff2a85' : rt.cls === 'gpu' ? '#ffb800' : rt.cls === 'qa' ? '#a77bff' : '#7b95b8';
+          c.fillStyle = rt.cls === 'need' ? '#ffb800' : isW ? '#ff2a85' : rt.cls === 'gpu' ? '#ffb800' : rt.cls === 'qa' ? '#a77bff' : '#7b95b8';
           c.font = 'bold 10.5px ui-monospace, Menlo, monospace';
           c.textAlign = 'right';
           c.fillText(rt.text, box.x + box.w - 12, topY + 3.5);
 
           c.fillStyle = ag.color;
-          c.fillText('[' + ag.label + ']', box.x + box.w - 76, topY + 3.5);
+          c.fillText('[' + ag.label + ']', box.x + box.w - (isNeed ? 96 : 76), topY + 3.5);
 
-          if (!compactRow && (b.activeSessionTitle || isW)) {
-            const tStr = (b.activeToolName ? '[' + b.activeToolName + '] ' : '') + (b.activeSessionTitle || 'Active session');
-            c.fillStyle = isW ? '#ff9ccc' : '#8cbce0';
+          if (!compactRow && (isNeed || b.activeSessionTitle || isW)) {
+            const tStr = isNeed
+              ? ('[! NEED ME] ' + (b.needsYouSummary || 'Needs decision'))
+              : ((b.activeToolName ? '[' + b.activeToolName + '] ' : '') + (b.activeSessionTitle || 'Active session'));
+            c.fillStyle = isNeed ? '#ffd975' : isW ? '#ff9ccc' : '#8cbce0';
             c.font = '11px ui-monospace, Menlo, monospace';
             c.textAlign = 'left';
             c.fillText(truncText(tStr, 46), box.x + 14, box.y + box.h - 9);
@@ -2913,9 +3271,9 @@
 
           c.beginPath();
           c.arc(box.portOut.x, box.portOut.y, 4.5, 0, Math.PI * 2);
-          c.fillStyle = isW ? '#ff2a85' : '#071326';
+          c.fillStyle = isNeed ? '#ffb800' : isW ? '#ff2a85' : '#071326';
           c.fill();
-          c.strokeStyle = isW ? '#fff' : '#00f0ff';
+          c.strokeStyle = (isNeed || isW) ? '#fff' : '#00f0ff';
           c.lineWidth = 1.6;
           c.stroke();
         }
@@ -2993,12 +3351,13 @@
             const wb = workerBoxes.get(wk.id);
             if (!wb) continue;
             const isW = wk.state === 'working';
+            const isPerm = wk.state === 'permission';
             const compactWk = wb.h < 33;
             roundRect(c, wb.x, wb.y, wb.w, wb.h, 6);
-            c.fillStyle = isW ? 'rgba(255, 42, 133, 0.16)' : 'rgba(10, 20, 42, 0.94)';
+            c.fillStyle = isPerm ? 'rgba(255, 184, 0, 0.16)' : isW ? 'rgba(255, 42, 133, 0.16)' : 'rgba(10, 20, 42, 0.94)';
             c.fill();
-            c.strokeStyle = isW ? '#ff2a85' : wk.state === 'succeeded' ? 'rgba(0, 255, 157, 0.45)' : 'rgba(0, 240, 255, 0.25)';
-            c.lineWidth = isW ? 1.8 : 1.1;
+            c.strokeStyle = isPerm ? '#ffb800' : isW ? '#ff2a85' : wk.state === 'succeeded' ? 'rgba(0, 255, 157, 0.45)' : 'rgba(0, 240, 255, 0.25)';
+            c.lineWidth = (isPerm || isW) ? 1.8 : 1.1;
             c.stroke();
 
             const wAg = formatAgentBadge(wk.agent);
@@ -3009,7 +3368,7 @@
 
             if (!compactWk) {
               const metaTxt = '[' + wAg.label + '] ' + (wk.bot ? ('via ' + wk.bot) : ('@ ' + wk.host)) + ' · ' + (wk.sessionTitle || wk.workspacePath || '');
-              c.fillStyle = isW ? '#ff9ccc' : '#8cbce0';
+              c.fillStyle = isPerm ? '#ffd975' : isW ? '#ff9ccc' : '#8cbce0';
               c.font = '10.5px ui-monospace, Menlo, monospace';
               c.fillText(truncText(metaTxt, 68), wb.x + 12, wb.y + 30);
             } else {
@@ -3019,16 +3378,16 @@
               c.fillText(truncText(metaTxt, 34), wb.x + 230, wb.y + 18);
             }
 
-            c.fillStyle = isW ? '#ff2a85' : wk.state === 'succeeded' ? '#00ff9d' : '#00f0ff';
+            c.fillStyle = isPerm ? '#ffb800' : isW ? '#ff2a85' : wk.state === 'succeeded' ? '#00ff9d' : '#00f0ff';
             c.font = 'bold 10.5px ui-monospace, Menlo, monospace';
             c.textAlign = 'right';
-            c.fillText(wk.state.toUpperCase(), wb.x + wb.w - 12, compactWk ? (wb.y + 18) : (wb.y + 15));
+            c.fillText(isPerm ? 'NEED YOU' : wk.state.toUpperCase(), wb.x + wb.w - 12, compactWk ? (wb.y + 18) : (wb.y + 15));
 
             c.beginPath();
             c.arc(wb.portIn.x, wb.portIn.y, 4.5, 0, Math.PI * 2);
-            c.fillStyle = isW ? '#ff2a85' : '#071326';
+            c.fillStyle = isPerm ? '#ffb800' : isW ? '#ff2a85' : '#071326';
             c.fill();
-            c.strokeStyle = isW ? '#fff' : '#00ff9d';
+            c.strokeStyle = (isPerm || isW) ? '#fff' : '#00ff9d';
             c.stroke();
           }
         }

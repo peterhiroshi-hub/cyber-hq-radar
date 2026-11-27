@@ -1660,3 +1660,510 @@ test('separates three-tier semantic traffic (6h recency cutoff, activeHosts vs r
 
   await worker.deactivate()
 })
+
+test('aggregates multi-host needs_you items, filters snoozed items, includes permission workers, and escalates/clears status bar', async () => {
+  const statusUpdates: Array<{ id?: string; text?: string; tone?: string; tooltip?: string }> = []
+  const host = mockHost({
+    results: {
+      'settings.get': { settings: {} },
+      'workspace.list': {
+        workspaces: [
+          {
+            id: 'folder:local-lead',
+            kind: 'folder',
+            name: 'Orion Leader',
+            path: '/Users/dev/.orca/bots/orion-leader',
+            branch: null,
+            hostId: 'local'
+          }
+        ],
+        truncated: false
+      },
+      'statusBar.update': (params: unknown) => {
+        statusUpdates.push((params || {}) as { id?: string; text?: string; tone?: string; tooltip?: string })
+        return { updated: true }
+      }
+    }
+  })
+
+  const now = Date.now()
+  let clearAllNeedsYou = false
+
+  const mockCli: CliRunner = async (args) => {
+    if (args[0] === 'environment' && args[1] === 'list') {
+      return {
+        environments: [
+          { id: 'env-hub', name: 'hub-mac', endpoints: [{ endpoint: 'ws://100.80.1.2:6768' }] }
+        ]
+      }
+    }
+    if (args[0] === 'bot' && args[1] === 'list' && !args.includes('--environment')) {
+      return {
+        bots: [
+          { id: 'b-local-lead', name: 'Orion Leader', agent: 'antigravity', chats: { count: 2 } }
+        ]
+      }
+    }
+    if (args[0] === 'worktree' && args[1] === 'ps' && !args.includes('--environment')) {
+      return {
+        worktrees: [
+          {
+            worktreeId: 'folder:local-lead',
+            repo: 'Bots',
+            bot: 'Orion Leader',
+            botHome: true,
+            path: '/Users/dev/.orca/bots/orion-leader',
+            status: 'idle',
+            lastActivityAt: now - 5_000
+          }
+        ]
+      }
+    }
+    if (args[0] === 'bot' && args[1] === 'item' && args[2] === 'list') {
+      assert.equal(args.includes('--status'), true)
+      assert.equal(args.includes('needs-you'), true)
+      if (clearAllNeedsYou) return { items: [] }
+      return {
+        items: [
+          {
+            uid: 'uid-local-1',
+            number: 297,
+            owner: { botId: 'b-local-lead', name: 'Orion Leader' },
+            title: 'Deploy v0.5.0 canary',
+            status: 'needs_you',
+            snoozedUntil: null,
+            chat: { id: 'chat-local-1', kind: 'chat', title: 'orion-team' },
+            question: {
+              eventId: 'ev-1',
+              text: 'Detailed text line 1\nLine 2',
+              gist: 'Approve canary rollout?',
+              decisions: [
+                {
+                  question: 'Ship canary to staging now?',
+                  replies: [
+                    { label: 'Approve', recommended: true },
+                    { label: 'Hold', recommended: false }
+                  ]
+                }
+              ]
+            },
+            updatedAt: now - 2_000,
+            lastActivityAt: now - 2_000
+          },
+          {
+            uid: 'uid-local-snoozed',
+            number: 298,
+            owner: { botId: 'b-local-lead', name: 'Orion Leader' },
+            title: 'Snoozed item must be ignored',
+            status: 'needs_you',
+            snoozedUntil: now + 3_600_000,
+            updatedAt: now - 1_000
+          }
+        ]
+      }
+    }
+    return { workers: [], worktrees: [], items: [] }
+  }
+
+  const mockHubHttp: HubRelayClient = {
+    async fetchSnapshot() {
+      return {
+        ok: true,
+        host: {
+          hostname: 'hub-mac',
+          metrics: null,
+          bots: [{ id: 'b-alpha', name: 'Alpha Delivery', agent: 'codex' }],
+          worktrees: [
+            {
+              worktreeId: 'folder:alpha-del',
+              repo: 'Bots',
+              bot: 'Alpha Delivery',
+              botHome: true,
+              path: '/Users/hub/.orca/bots/alpha-delivery',
+              status: 'idle',
+              lastActivityAt: now - 4_000
+            }
+          ],
+          dispatches: [],
+          needsYou: clearAllNeedsYou
+            ? []
+            : [
+                {
+                  id: 'uid-hub-1',
+                  number: 412,
+                  bot: 'Alpha Delivery',
+                  status: 'needs-you',
+                  title: 'Merge release branch',
+                  question: 'Approve production database migration?',
+                  replyCount: 3,
+                  chatId: 'chat-alpha-team',
+                  chatTitle: 'alpha-team',
+                  snoozedUntil: null,
+                  updatedAt: now - 1_000
+                },
+                {
+                  id: 'uid-hub-snoozed',
+                  number: 413,
+                  bot: 'Alpha Delivery',
+                  status: 'needs_you',
+                  title: 'Snoozed remote item',
+                  question: 'Later?',
+                  snoozedUntil: now + 600_000,
+                  updatedAt: now
+                }
+              ]
+        },
+        children: [
+          {
+            env: { id: 'c-gpu', name: 'gpu-box', endpoints: [{ endpoint: 'ws://100.80.2.10:6768' }] },
+            envName: 'gpu-box',
+            ok: true,
+            workers: clearAllNeedsYou
+              ? []
+              : [
+                  {
+                    dispatchId: 'ctx_perm_1',
+                    state: 'permission',
+                    liveness: 'live',
+                    agent: 'codex',
+                    terminal: 'term_perm_gpu_1',
+                    workspace: 'repo::/work/alpha/perm-task'
+                  }
+                ],
+            remotePs: clearAllNeedsYou
+              ? []
+              : [
+                  {
+                    worktreeId: 'repo::/work/alpha/perm-task',
+                    repo: 'alpha',
+                    displayName: 'perm-task',
+                    path: '/work/alpha/perm-task',
+                    status: 'permission',
+                    crossStoreParent: { parent: { workspaceKey: 'folder:alpha-del' } },
+                    lastActivityAt: now - 3_000
+                  }
+                ],
+            metrics: null
+          }
+        ]
+      }
+    },
+    async activateWorktree() { return false }
+  }
+
+  const mod = {
+    default: (orca: Parameters<typeof main.default>[0]) =>
+      main.default(orca, mockCli, async () => null, undefined, undefined, undefined, mockHubHttp),
+    deactivate: main.deactivate
+  }
+  const worker = await mountWorker(mod, { host })
+  const snap = await worker.request('hq.getSnapshot')
+
+  // 3 active alerts: hub-mac #412 (newest), local #297, gpu-box permission worker (oldest); both snoozed items excluded
+  assert.equal(snap.summary.needsYouCount, 3)
+  assert.equal(snap.needsYou?.length, 3)
+  assert.equal(snap.needsYou?.[0].host, 'hub-mac')
+  assert.equal(snap.needsYou?.[0].number, 412)
+  assert.equal(snap.needsYou?.[0].replyCount, 3)
+  assert.equal(snap.needsYou?.[0].workspaceId, 'folder:alpha-del')
+  assert.equal(snap.needsYou?.[0].workspacePath, '/Users/hub/.orca/bots/alpha-delivery')
+
+  assert.equal(snap.needsYou?.[1].host, 'local')
+  assert.equal(snap.needsYou?.[1].number, 297)
+  assert.equal(snap.needsYou?.[1].question, 'Ship canary to staging now?')
+  assert.equal(snap.needsYou?.[1].replyCount, 2)
+  assert.equal(snap.needsYou?.[1].chatTitle, 'orion-team')
+  assert.equal(snap.needsYou?.[1].workspaceId, 'folder:local-lead')
+
+  assert.equal(snap.needsYou?.[2].kind, 'permission')
+  assert.equal(snap.needsYou?.[2].host, 'gpu-box')
+  assert.equal(snap.needsYou?.[2].bot, 'Alpha Delivery')
+  assert.equal(snap.needsYou?.[2].terminalId, 'term_perm_gpu_1')
+
+  // Bot badges populated
+  const orionBot = snap.bots.find((b) => b.name === 'Orion Leader')
+  const alphaBot = snap.bots.find((b) => b.name === 'Alpha Delivery')
+  assert.equal(orionBot?.needsYouCount, 1)
+  assert.equal(orionBot?.needsYouSummary, '#297 Ship canary to staging now?')
+  assert.equal(alphaBot?.needsYouCount, 2)
+  assert.equal(alphaBot?.needsYouSummary, '#412 Approve production database migration?')
+
+  // Status bar escalated to warning with NEED YOU
+  const escalated = statusUpdates[statusUpdates.length - 1]
+  assert.equal(escalated?.tone, 'warning')
+  assert.ok(escalated?.text?.includes('3 NEED YOU'))
+  assert.ok(escalated?.tooltip?.startsWith('3 item(s) need your decision · '))
+
+  // Once resolved, status bar returns to normal immediately
+  clearAllNeedsYou = true
+  const clearedSnap = await worker.request('hq.refresh')
+  assert.equal(clearedSnap.summary.needsYouCount, 0)
+  assert.equal(clearedSnap.needsYou?.length, 0)
+  const restored = statusUpdates[statusUpdates.length - 1]
+  assert.notEqual(restored?.tone, 'warning')
+  assert.equal(restored?.text?.includes('NEED YOU'), false)
+
+  await worker.deactivate()
+})
+
+test('collects needs_you from direct paired control host without HTTP hub relay', async () => {
+  const host = mockHost({
+    results: {
+      'settings.get': {
+        settings: {
+          controlEnvironment: 'ctrl-mac',
+          showLocalHost: false
+        }
+      },
+      'workspace.list': { workspaces: [], truncated: false }
+    }
+  })
+
+  const now = Date.now()
+  const mockCli: CliRunner = async (args) => {
+    if (args[0] === 'environment' && args[1] === 'list') {
+      return {
+        environments: [
+          { id: 'e-ctrl', name: 'ctrl-mac', endpoints: [{ endpoint: 'ws://100.64.0.50:6768' }] }
+        ]
+      }
+    }
+    if (args[0] === 'bot' && args[1] === 'list' && args.includes('ctrl-mac')) {
+      return {
+        bots: [{ id: 'b-ctrl', name: 'Beta Leader', agent: 'antigravity', chats: { count: 2 } }]
+      }
+    }
+    if (
+      args[0] === 'bot' &&
+      args[1] === 'item' &&
+      args[2] === 'list' &&
+      args.includes('--environment') &&
+      args.includes('ctrl-mac')
+    ) {
+      return {
+        items: [
+          {
+            uid: 'ctrl-item-1',
+            number: 88,
+            title: 'Confirm QA sign-off',
+            status: 'needs_you',
+            question: { gist: 'Ready to promote release candidate?' },
+            updatedAt: now
+          },
+          {
+            uid: 'ctrl-item-2',
+            number: 89,
+            title: 'Fallback to text first line',
+            status: 'needs_you',
+            question: { text: '\n  Confirm rollback threshold?  \nSecond line details' },
+            updatedAt: now - 500
+          }
+        ]
+      }
+    }
+    return { workers: [], worktrees: [], items: [] }
+  }
+
+  const noopRelayCli: RelayCliRunner = async () => null
+  const mod = {
+    default: (orca: Parameters<typeof main.default>[0]) =>
+      main.default(orca, mockCli, async () => null, undefined, undefined, noopRelayCli, noopHubRelay),
+    deactivate: main.deactivate
+  }
+  const worker = await mountWorker(mod, { host })
+  const snap = await worker.request('hq.getSnapshot')
+
+  assert.equal(snap.controlHostId, 'ctrl-mac')
+  assert.equal(snap.summary.needsYouCount, 2)
+  assert.equal(snap.needsYou?.[0].host, 'ctrl-mac')
+  assert.equal(snap.needsYou?.[0].bot, 'Beta Leader')
+  assert.equal(snap.needsYou?.[0].number, 88)
+  assert.equal(snap.needsYou?.[0].question, 'Ready to promote release candidate?')
+  assert.equal(snap.needsYou?.[1].number, 89)
+  assert.equal(snap.needsYou?.[1].question, 'Confirm rollback threshold?')
+
+  await worker.deactivate()
+})
+
+test('hq.openNeedsYou opens matching group-chat/Bot folder, focuses permission terminal, falls back to view.tasks, and exposes wall routes', async () => {
+  const openedIds: string[] = []
+  const focusedTerms: string[] = []
+  const ranCommands: Array<{ action?: string }> = []
+
+  const host = mockHost({
+    results: {
+      'settings.get': { settings: {} },
+      'workspace.list': {
+        workspaces: [
+          {
+            id: 'folder:alpha-team',
+            kind: 'folder',
+            name: 'alpha-team',
+            path: '/Users/dev/.orca/chats/alpha-team',
+            branch: null,
+            hostId: 'local'
+          },
+          {
+            id: 'folder:orion-lead',
+            kind: 'folder',
+            name: 'Orion Leader',
+            path: '/Users/dev/.orca/bots/orion-leader',
+            branch: null,
+            hostId: 'local'
+          }
+        ],
+        truncated: false
+      },
+      'workspace.open': (params: unknown) => {
+        const id = (params as { workspaceId?: string })?.workspaceId
+        if (id) openedIds.push(id)
+        return { opened: true }
+      },
+      'agents.list': { agents: [] },
+      'terminal.focus': (params: unknown) => {
+        const tid = (params as { terminalId?: string })?.terminalId
+        if (tid) focusedTerms.push(tid)
+        return { focused: true }
+      },
+      'commands.run': (params: unknown) => {
+        ranCommands.push((params || {}) as { action?: string })
+        return { ran: true }
+      }
+    }
+  })
+
+  const noopCli: CliRunner = async () => ({ bots: [], environments: [], workers: [], worktrees: [], items: [] })
+  const mockWallOpener: WallOpener = async () => true
+  const mod = {
+    default: (orca: Parameters<typeof main.default>[0]) =>
+      main.default(orca, noopCli, async () => null, undefined, mockWallOpener, undefined, noopHubRelay),
+    deactivate: main.deactivate
+  }
+  const worker = await mountWorker(mod, { host })
+
+  // 1. Opens matching group-chat folder (chatTitle) directly when present in workspace.list
+  const chatJump = await worker.request('hq.openNeedsYou', {
+    host: 'local',
+    botName: 'Orion Leader',
+    chatTitle: 'alpha-team',
+    itemNumber: 297,
+    kind: 'item'
+  })
+  assert.equal(chatJump.opened, true)
+  assert.equal(chatJump.mode, 'opened')
+  assert.equal(openedIds[0], 'folder:alpha-team')
+
+  // 2. Opens matching Bot folder directly when chatTitle is absent from workspace.list
+  const botJump = await worker.request('hq.openNeedsYou', {
+    host: 'local',
+    botName: 'Orion Leader',
+    chatTitle: 'nonexistent-chat',
+    itemNumber: 299,
+    kind: 'item'
+  })
+  assert.equal(botJump.opened, true)
+  assert.equal(botJump.mode, 'opened')
+  assert.equal(openedIds[1], 'folder:orion-lead')
+
+  // 3. Focuses permission-blocked worker terminal directly
+  const permJump = await worker.request('hq.openNeedsYou', {
+    host: 'local',
+    botName: 'Orion Leader',
+    terminalId: 'term_blocked_1',
+    kind: 'permission'
+  })
+  assert.equal(permJump.opened, true)
+  assert.equal(permJump.mode, 'focused')
+  assert.equal(focusedTerms[0], 'term_blocked_1')
+
+  // 4. Remote Bot NOT present in local workspace.list -> seamlessly falls back to commands.run({ action: 'view.tasks' })
+  const remoteFallback = await worker.request('hq.openNeedsYou', {
+    host: 'hub-mac',
+    botName: 'Remote Beta Bot',
+    workspaceId: 'folder:remote-beta',
+    chatTitle: 'remote-beta-chat',
+    itemNumber: 501,
+    kind: 'item'
+  })
+  assert.equal(remoteFallback.opened, true)
+  assert.equal(remoteFallback.mode, 'tasks')
+  assert.equal(remoteFallback.detail, 'Opened Orca Tasks / Needs You queue')
+  assert.equal(ranCommands[0]?.action, 'view.tasks')
+
+  // 5. Direct hq.openTasksView invokes commands.run({ action: 'view.tasks' })
+  const directTasks = await worker.request('hq.openTasksView')
+  assert.equal(directTasks.opened, true)
+  assert.equal(directTasks.mode, 'tasks')
+  assert.equal(ranCommands[1]?.action, 'view.tasks')
+
+  // 6. Fullscreen wallboard HTTP routes /api/open-needs-you & /api/open-tasks-view work end-to-end
+  const wall = await worker.request('hq.openFullscreenWall')
+  assert.ok(wall.url)
+  const parsedWallUrl = new URL(wall.url!)
+  const token = parsedWallUrl.searchParams.get('token') || ''
+  const baseUrl = `${parsedWallUrl.protocol}//${parsedWallUrl.host}`
+  const http = await import('node:http')
+  const postWall = (route: string, body: unknown) =>
+    new Promise<{ status: number; json: { opened: boolean; mode: string } }>((resolve, reject) => {
+      const payload = JSON.stringify(body)
+      const req = http.request(
+        `${baseUrl}${route}?token=${encodeURIComponent(token)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(payload, 'utf8')) }
+        },
+        (res) => {
+          let raw = ''
+          res.on('data', (c) => { raw += String(c) })
+          res.on('end', () => resolve({ status: res.statusCode || 0, json: JSON.parse(raw) }))
+        }
+      )
+      req.on('error', reject)
+      req.write(payload)
+      req.end()
+    })
+
+  const wallNy = await postWall('/api/open-needs-you', { host: 'hub-mac', botName: 'Unpaired Remote Bot', kind: 'item' })
+  assert.equal(wallNy.status, 200)
+  assert.equal(wallNy.json.opened, true)
+  assert.equal(wallNy.json.mode, 'tasks')
+
+  const wallTasks = await postWall('/api/open-tasks-view', {})
+  assert.equal(wallTasks.status, 200)
+  assert.equal(wallTasks.json.opened, true)
+  assert.equal(wallTasks.json.mode, 'tasks')
+
+  await worker.deactivate()
+})
+
+test('verifies hub-relay.mjs and panel.html contracts for needs-you collection, cache safety, jump wiring, and visual escalation', async () => {
+  const fs = await import('node:fs/promises')
+  const { fileURLToPath } = await import('node:url')
+
+  const relayPath = fileURLToPath(new URL('../scripts/hub-relay.mjs', import.meta.url).href)
+  const relaySource = await fs.readFile(relayPath, 'utf8')
+  assert.match(relaySource, /function extractQuestionPrompt\(q\)/)
+  assert.match(relaySource, /function mapRawNeedsYou\(botName, items\)/)
+  assert.match(relaySource, /lastKnownNeedsYouByBot = new Map\(\)/)
+  assert.match(relaySource, /'bot', 'item', 'list', '--bot', b\.name, '--status', 'needs-you', '--json'/)
+  assert.match(relaySource, /nyRes !== null && Array\.isArray\(nyRes\.items\)/)
+  assert.match(relaySource, /lastKnownNeedsYouByBot\.set\(b\.name, needsYou\)/)
+  assert.match(relaySource, /snoozedUntil > now/)
+  assert.match(relaySource, /needsYou:\s*hubNeedsYou/)
+  assert.match(relaySource, /childRelay\?\.host\?\.needsYou/)
+  assert.match(relaySource, /needsYou:\s*childNeedsYou/)
+  assert.match(relaySource, /needsYou:\s*Array\.isArray\(nc\.needsYou\)/)
+
+  const panelPath = fileURLToPath(new URL('./panel.html', import.meta.url).href)
+  const panelHtml = await fs.readFile(panelPath, 'utf8')
+  assert.match(panelHtml, /'hq\.openNeedsYou':\s*'\/api\/open-needs-you'/)
+  assert.match(panelHtml, /'hq\.openTasksView':\s*'\/api\/open-tasks-view'/)
+  assert.match(panelHtml, /id="kpiNeedsChip"/)
+  assert.match(panelHtml, /id="needsYouBar"/)
+  assert.match(panelHtml, /\.bot-node\.needs-you/)
+  assert.match(panelHtml, /\.route-tag\.need/)
+  assert.match(panelHtml, /body\.wall-mode \.bot-node:not\(\.working\):not\(\.unread\):not\(\.needs-you\) \.bot-task/)
+  assert.match(panelHtml, /target\.closest\('\.ny-pill'\)/)
+  assert.match(panelHtml, /kind = 'needs-you'/)
+  assert.match(panelHtml, /l:\s*'NEED ME'/)
+})

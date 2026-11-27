@@ -342,6 +342,67 @@ let lastKnownEnvs = []
 let lastKnownBots = []
 let lastKnownWorktrees = []
 let lastKnownDispatches = []
+const lastKnownNeedsYouByBot = new Map()
+
+function normalizePromptText(raw, maxLen = 110) {
+  const s = String(raw || '').replace(/\s+/g, ' ').trim()
+  if (!s) return null
+  return s.length > maxLen ? `${s.slice(0, maxLen - 1)}…` : s
+}
+
+function extractQuestionPrompt(q) {
+  if (!q || typeof q !== 'object') return null
+  const firstDecision = Array.isArray(q.decisions) && q.decisions.length > 0 ? q.decisions[0] : null
+  if (firstDecision && typeof firstDecision.question === 'string' && firstDecision.question.trim()) {
+    return normalizePromptText(firstDecision.question, 110)
+  }
+  if (typeof q.gist === 'string' && q.gist.trim()) {
+    return normalizePromptText(q.gist, 110)
+  }
+  if (typeof q.text === 'string' && q.text.trim()) {
+    const firstLine = q.text.split(/\r?\n/).map((line) => line.trim()).find(Boolean)
+    if (firstLine) return normalizePromptText(firstLine, 110)
+  }
+  return null
+}
+
+function mapRawNeedsYou(botName, items) {
+  if (!Array.isArray(items) || items.length === 0) return []
+  const now = Date.now()
+  const out = []
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i]
+    if (!it || typeof it !== 'object') continue
+    const st = typeof it.status === 'string' ? it.status.trim().toLowerCase() : ''
+    if (st && st !== 'needs_you' && st !== 'needs-you') continue
+    if (typeof it.snoozedUntil === 'number' && it.snoozedUntil > now) continue
+    const decisions = Array.isArray(it.question?.decisions) ? it.question.decisions : []
+    const replyCount = decisions.reduce(
+      (acc, d) => acc + (Array.isArray(d?.replies) ? d.replies.length : 0),
+      0
+    )
+    const ownerName = typeof it.owner?.name === 'string' && it.owner.name.trim() ? it.owner.name.trim() : botName
+    const title = normalizePromptText(it.title, 110) || 'Needs your decision'
+    const question = extractQuestionPrompt(it.question)
+    const updatedAt =
+      typeof it.updatedAt === 'number'
+        ? it.updatedAt
+        : (typeof it.lastActivityAt === 'number' ? it.lastActivityAt : null)
+    out.push({
+      id: String(it.uid || it.id || (typeof it.number === 'number' ? `item-${it.number}` : `${ownerName}-${i}`)),
+      number: typeof it.number === 'number' ? it.number : null,
+      bot: ownerName,
+      title,
+      question,
+      replyCount,
+      chatId: it.chat?.id ? String(it.chat.id) : null,
+      chatTitle: it.chat?.title ? String(it.chat.title) : null,
+      snoozedUntil: typeof it.snoozedUntil === 'number' ? it.snoozedUntil : null,
+      updatedAt
+    })
+  }
+  return out
+}
 
 async function mapConcurrent(items, limit, fn) {
   const results = new Array(items.length)
@@ -381,13 +442,17 @@ function refreshRelaySnapshot(depth = 0, visited = new Set()) {
     if (fetchedWorktrees.length > 0) lastKnownWorktrees = fetchedWorktrees
     const hubWorktrees = fetchedWorktrees.length > 0 ? fetchedWorktrees : lastKnownWorktrees
 
-    // Collect authoritative per-Bot dispatch records (real dispatchId -> Bot + server + title) with bounded concurrency
+    // Collect authoritative per-Bot dispatch records and active needs_you items with bounded concurrency
     const fetchedDispatches = []
-    const workLists = await mapConcurrent(hubBots, 3, async (b) => {
-      if (!b?.name) return []
-      const wl = await runOrcaJson(['bot', 'work', 'list', '--bot', b.name, '--json'], 10000)
+    const hubNeedsYou = []
+    const perBotResults = await mapConcurrent(hubBots, 3, async (b) => {
+      if (!b?.name) return { dispatches: [], needsYou: [] }
+      const [wl, nyRes] = await Promise.all([
+        runOrcaJson(['bot', 'work', 'list', '--bot', b.name, '--json'], 10000),
+        runOrcaJson(['bot', 'item', 'list', '--bot', b.name, '--status', 'needs-you', '--json'], 8000)
+      ])
       const items = Array.isArray(wl?.items) ? wl.items : []
-      return items.slice(0, 20).map((it) => ({
+      const dispatches = items.slice(0, 20).map((it) => ({
         bot: b.name,
         dispatchId: it.dispatchId || null,
         workspace: it.workspace || null,
@@ -396,8 +461,22 @@ function refreshRelaySnapshot(depth = 0, visited = new Set()) {
         state: it.state || null,
         startedAt: typeof it.startedAt === 'number' ? it.startedAt : null
       }))
+      // Critical cache safety: clear cached needs_you immediately when CLI succeeds with items: []
+      let needsYou = []
+      if (nyRes !== null && Array.isArray(nyRes.items)) {
+        needsYou = mapRawNeedsYou(b.name, nyRes.items)
+        lastKnownNeedsYouByBot.set(b.name, needsYou)
+      } else {
+        const now = Date.now()
+        const prev = lastKnownNeedsYouByBot.get(b.name) || []
+        needsYou = prev.filter((x) => !(typeof x.snoozedUntil === 'number' && x.snoozedUntil > now))
+      }
+      return { dispatches, needsYou }
     })
-    for (const rows of workLists) fetchedDispatches.push(...rows)
+    for (const row of perBotResults) {
+      fetchedDispatches.push(...row.dispatches)
+      hubNeedsYou.push(...row.needsYou)
+    }
     if (fetchedDispatches.length > 0) lastKnownDispatches = fetchedDispatches
     const hubDispatches = fetchedDispatches.length > 0 ? fetchedDispatches : lastKnownDispatches
 
@@ -429,10 +508,12 @@ function refreshRelaySnapshot(depth = 0, visited = new Set()) {
         const metrics = childRelay?.host?.metrics ?? sshMetrics ?? null
         const childBots = Array.isArray(childRelay?.host?.bots) ? childRelay.host.bots : []
         const childDispatches = Array.isArray(childRelay?.host?.dispatches) ? childRelay.host.dispatches : []
+        const childNeedsYou = Array.isArray(childRelay?.host?.needsYou) ? childRelay.host.needsYou : []
         const nested = Array.isArray(childRelay?.children)
           ? childRelay.children.map((nc) => ({
               ...nc,
               dispatches: Array.isArray(nc.dispatches) ? nc.dispatches : [],
+              needsYou: Array.isArray(nc.needsYou) ? nc.needsYou : [],
               viaChain: nc.viaChain ? `${envName} -> ${nc.viaChain}` : envName
             }))
           : []
@@ -446,6 +527,7 @@ function refreshRelaySnapshot(depth = 0, visited = new Set()) {
             remotePs,
             bots: childBots,
             dispatches: childDispatches,
+            needsYou: childNeedsYou,
             metrics
           },
           nested
@@ -477,7 +559,8 @@ function refreshRelaySnapshot(depth = 0, visited = new Set()) {
         metrics: hubMetrics,
         bots: hubBots,
         worktrees: hubWorktrees,
-        dispatches: hubDispatches
+        dispatches: hubDispatches,
+        needsYou: hubNeedsYou
       },
       children
     }

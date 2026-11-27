@@ -59,6 +59,25 @@ export type BotNodeInfo = {
   activeSessionTitle: string | null
   activeToolName: string | null
   lastActivityAt: number | null
+  needsYouCount?: number
+  needsYouSummary?: string | null
+}
+
+export type NeedsYouItem = {
+  id: string
+  kind: 'item' | 'permission'
+  number: number | null
+  bot: string
+  host: HostId
+  title: string
+  question: string | null
+  replyCount: number
+  chatId: string | null
+  chatTitle: string | null
+  workspaceId: string | null
+  workspacePath: string | null
+  terminalId: string | null
+  updatedAt: number | null
 }
 
 export type WorkerNodeInfo = {
@@ -93,6 +112,7 @@ export type HqSnapshot = {
   hosts: HostNodeInfo[]
   bots: BotNodeInfo[]
   workers: WorkerNodeInfo[]
+  needsYou?: NeedsYouItem[]
   events: HqEventEntry[]
   summary: {
     totalBots: number
@@ -100,7 +120,25 @@ export type HqSnapshot = {
     onlineHosts: number
     activeWorkers: number
     recentWorkers: number
+    needsYouCount?: number
   }
+}
+
+export type OpenNeedsYouInput = {
+  host?: HostId | null
+  botName?: string | null
+  workspaceId?: string | null
+  workspacePath?: string | null
+  chatTitle?: string | null
+  terminalId?: string | null
+  itemNumber?: number | null
+  kind?: 'item' | 'permission'
+}
+
+export type OpenNeedsYouOutput = {
+  opened: boolean
+  mode: 'focused' | 'opened' | 'tasks' | 'activated' | 'fallback' | 'none'
+  detail: string
 }
 
 export type OpenSessionInput = {
@@ -157,6 +195,8 @@ declare module 'orca' {
     'hq.refresh': { output: HqSnapshot }
     'hq.openWorkspace': { input: { workspaceId: string }; output: { opened: boolean } }
     'hq.openSession': { input: OpenSessionInput; output: OpenSessionOutput }
+    'hq.openNeedsYou': { input: OpenNeedsYouInput; output: OpenNeedsYouOutput }
+    'hq.openTasksView': { output: OpenNeedsYouOutput }
     'hq.saveVideo': { input: SaveVideoInput; output: SaveVideoOutput }
     'hq.getSaveEndpoint': { output: SaveEndpointOutput }
     'hq.openFullscreenWall': { output: OpenWallOutput }

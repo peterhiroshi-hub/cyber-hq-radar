@@ -17,6 +17,9 @@ import type {
   HostNodeInfo,
   HqEventEntry,
   HqSnapshot,
+  NeedsYouItem,
+  OpenNeedsYouInput,
+  OpenNeedsYouOutput,
   OpenSessionInput,
   OpenSessionOutput,
   OpenWallOutput,
@@ -60,6 +63,35 @@ export type RawBotDispatch = {
   startedAt?: number | null
 }
 
+export type RawNeedsYouItem = {
+  id?: string | null
+  uid?: string | null
+  number?: number | null
+  bot?: string | null
+  owner?: { botId?: string | null; name?: string | null } | null
+  title?: string | null
+  status?: string | null
+  question?:
+    | string
+    | {
+        eventId?: string | null
+        text?: string | null
+        gist?: string | null
+        decisions?: Array<{
+          question?: string | null
+          replies?: Array<{ label?: string | null; recommended?: boolean }> | null
+        }> | null
+      }
+    | null
+  replyCount?: number | null
+  chatId?: string | null
+  chatTitle?: string | null
+  chat?: { id?: string | null; kind?: string | null; title?: string | null } | null
+  snoozedUntil?: number | null
+  updatedAt?: number | null
+  lastActivityAt?: number | null
+}
+
 export type HubRelayChildPayload = {
   env?: RawEnv
   envName?: string
@@ -69,6 +101,7 @@ export type HubRelayChildPayload = {
   remotePs?: RawWorktreePs[]
   bots?: RawBot[]
   dispatches?: RawBotDispatch[]
+  needsYou?: RawNeedsYouItem[]
   metrics?: HostMetrics | null
 }
 
@@ -80,6 +113,7 @@ export type HubRelaySnapshotPayload = {
     bots?: RawBot[]
     worktrees?: RawWorktreePs[]
     dispatches?: RawBotDispatch[]
+    needsYou?: RawNeedsYouItem[]
   }
   children?: HubRelayChildPayload[]
 }
@@ -654,6 +688,36 @@ export function mapWorkerState(
   return 'idle'
 }
 
+function normalizeNeedsYouText(raw: string | null | undefined, maxLen = 110): string | null {
+  const s = String(raw || '').replace(/\s+/g, ' ').trim()
+  if (!s) return null
+  return s.length > maxLen ? `${s.slice(0, maxLen - 1)}…` : s
+}
+
+function extractNeedsYouQuestion(q: RawNeedsYouItem['question']): { question: string | null; replyCount: number } {
+  if (!q) return { question: null, replyCount: 0 }
+  if (typeof q === 'string') {
+    return { question: normalizeNeedsYouText(q, 110), replyCount: 0 }
+  }
+  const decisions = Array.isArray(q.decisions) ? q.decisions : []
+  const replyCount = decisions.reduce(
+    (acc, d) => acc + (Array.isArray(d?.replies) ? d.replies.length : 0),
+    0
+  )
+  const firstDecQ = decisions[0]?.question
+  if (typeof firstDecQ === 'string' && firstDecQ.trim()) {
+    return { question: normalizeNeedsYouText(firstDecQ, 110), replyCount }
+  }
+  if (typeof q.gist === 'string' && q.gist.trim()) {
+    return { question: normalizeNeedsYouText(q.gist, 110), replyCount }
+  }
+  if (typeof q.text === 'string' && q.text.trim()) {
+    const firstLine = q.text.split(/\r?\n/).map((line) => line.trim()).find(Boolean)
+    if (firstLine) return { question: normalizeNeedsYouText(firstLine, 110), replyCount }
+  }
+  return { question: null, replyCount }
+}
+
 function extractEndpointHost(endpoint: string | undefined): string | null {
   if (!endpoint) return null
   const m = endpoint.match(/^(?:wss?|https?):\/\/([^:/]+)/i)
@@ -815,6 +879,7 @@ export async function collectHqSnapshot(
     remotePs: RawWorktreePs[]
     hostedBots: RawBot[]
     dispatches: RawBotDispatch[]
+    needsYou: RawNeedsYouItem[]
     metrics: HostMetrics | null
   }
 
@@ -850,6 +915,7 @@ export async function collectHqSnapshot(
         : []
       const hostedBots = relayBots.length > 0 ? relayBots : cliBots
       const dispatches = Array.isArray(httpRelaySnap?.host?.dispatches) ? httpRelaySnap.host.dispatches : []
+      const needsYou = Array.isArray(httpRelaySnap?.host?.needsYou) ? httpRelaySnap.host.needsYou : []
       return {
         env,
         envName,
@@ -863,6 +929,7 @@ export async function collectHqSnapshot(
         remotePs,
         hostedBots,
         dispatches,
+        needsYou,
         metrics
       }
     })
@@ -898,6 +965,7 @@ export async function collectHqSnapshot(
         remotePs: Array.isArray(ch.remotePs) ? ch.remotePs : [],
         hostedBots: Array.isArray(ch.bots) ? ch.bots : [],
         dispatches: Array.isArray(ch.dispatches) ? ch.dispatches : [],
+        needsYou: Array.isArray(ch.needsYou) ? ch.needsYou : [],
         metrics: ch.metrics ?? null
       })
     }
@@ -957,6 +1025,7 @@ export async function collectHqSnapshot(
             remotePs,
             hostedBots: [],
             dispatches: [],
+            needsYou: [],
             metrics
           }
         })()
@@ -1150,24 +1219,30 @@ export async function collectHqSnapshot(
     }
   }
 
+  const rawNeedsYouEntries: Array<{ raw: RawNeedsYouItem; sourceHost: HostId; fallbackBot?: string }> = []
+
   for (const r of remoteResults) {
     for (const d of r.dispatches) ingestDispatch(d, r.envName)
+    for (const ny of r.needsYou) rawNeedsYouEntries.push({ raw: ny, sourceHost: r.envName })
   }
 
-  // Also query local Bot work lists for Bots hosted locally (never guessing from names)
+  // Also query local Bot work lists & needs-you queues for Bots hosted locally (never guessing from names)
   const localOwnedBots = rawBots.filter((b) => {
     if (!b.name) return false
     const owner = botHostByName.get(b.name) || controlHostId
     return owner === 'local'
   })
   if (includeLocal && localOwnedBots.length > 0) {
-    const localWorkLists = await Promise.all(
+    const localBotPolls = await Promise.all(
       localOwnedBots.map(async (b) => {
-        const res = await cli(['bot', 'work', 'list', '--bot', b.name!, '--json']).catch(() => null)
+        const [res, nyRes] = await Promise.all([
+          cli(['bot', 'work', 'list', '--bot', b.name!, '--json']).catch(() => null),
+          cli(['bot', 'item', 'list', '--bot', b.name!, '--status', 'needs-you', '--json']).catch(() => null)
+        ])
         const items = Array.isArray((res as { items?: unknown })?.items)
           ? ((res as { items: Array<{ dispatchId?: string | null; workspace?: string | null; server?: string | null; title?: string | null; state?: string | null; startedAt?: number | null }> }).items)
           : []
-        return items.slice(0, 20).map((it): RawBotDispatch => ({
+        const dispatches = items.slice(0, 20).map((it): RawBotDispatch => ({
           bot: b.name!,
           dispatchId: it.dispatchId || null,
           workspace: it.workspace || null,
@@ -1176,10 +1251,47 @@ export async function collectHqSnapshot(
           state: it.state || null,
           startedAt: typeof it.startedAt === 'number' ? it.startedAt : null
         }))
+        const nyItems = Array.isArray((nyRes as { items?: unknown })?.items)
+          ? ((nyRes as { items: RawNeedsYouItem[] }).items)
+          : []
+        return { botName: b.name!, dispatches, nyItems }
       })
     )
-    for (const rows of localWorkLists) {
-      for (const d of rows) ingestDispatch(d, 'local')
+    for (const row of localBotPolls) {
+      for (const d of row.dispatches) ingestDispatch(d, 'local')
+      for (const ny of row.nyItems) {
+        rawNeedsYouEntries.push({ raw: ny, sourceHost: 'local', fallbackBot: row.botName })
+      }
+    }
+  }
+
+  // Direct paired control host without HTTP hub relay: query needs-you items via paired CLI
+  if (controlHostId !== 'local') {
+    const ctrlRemote = directRemoteResults.find((r) => r.envName === controlHostId)
+    if (!ctrlRemote?.httpRelay) {
+      const ctrlOwnedBots = rawBots.filter((b) => {
+        if (!b.name) return false
+        const owner = botHostByName.get(b.name) || controlHostId
+        return owner === controlHostId
+      })
+      if (ctrlOwnedBots.length > 0) {
+        const ctrlNyPolls = await Promise.all(
+          ctrlOwnedBots.map(async (b) => {
+            const nyRes = await cli([
+              'bot', 'item', 'list', '--environment', controlHostId, '--bot', b.name!, '--status', 'needs-you', '--json'
+            ]).catch(() => null)
+            const nyItems = Array.isArray((nyRes as { items?: unknown })?.items)
+              ? ((nyRes as { items: RawNeedsYouItem[] }).items)
+              : []
+            return { botName: b.name!, nyItems }
+          })
+        )
+        for (const row of ctrlNyPolls) {
+          for (const ny of row.nyItems) {
+            rawNeedsYouEntries.push({ raw: ny, sourceHost: controlHostId, fallbackBot: row.botName })
+          }
+        }
+      }
     }
   }
 
@@ -1498,6 +1610,98 @@ export async function collectHqSnapshot(
     return v === 'running' || v === 'working'
   }
 
+  // Aggregate fleet-wide Needs You items (real bot item list + permission-blocked workers), deduped & sorted newest first
+  const nowMs = Date.now()
+  const botMetaByNameLower = new Map<string, { name: string; workspaceId: string | null; workspacePath: string | null }>()
+  for (const b of rawBots) {
+    if (!b.name) continue
+    const home = psByBotHome.get(b.name)
+    const wsId = home?.worktreeId ?? hostWsByBotName.get(b.name.toLowerCase()) ?? null
+    const wsPath = home?.path ?? null
+    botMetaByNameLower.set(b.name.toLowerCase(), { name: b.name, workspaceId: wsId, workspacePath: wsPath })
+  }
+
+  const dedupedNeedsYou = new Map<string, NeedsYouItem>()
+  const upsertNeedsYou = (item: NeedsYouItem) => {
+    const key = `${item.host}:${item.kind}:${item.number ?? item.id}`
+    const existing = dedupedNeedsYou.get(key)
+    if (!existing || (item.updatedAt ?? 0) > (existing.updatedAt ?? 0)) {
+      dedupedNeedsYou.set(key, item)
+    }
+  }
+
+  for (let idx = 0; idx < rawNeedsYouEntries.length; idx++) {
+    const { raw, sourceHost, fallbackBot } = rawNeedsYouEntries[idx]
+    if (!raw || typeof raw !== 'object') continue
+    const st = typeof raw.status === 'string' ? raw.status.trim().toLowerCase() : ''
+    if (st && st !== 'needs_you' && st !== 'needs-you') continue
+    if (typeof raw.snoozedUntil === 'number' && raw.snoozedUntil > nowMs) continue
+    const botName =
+      (typeof raw.bot === 'string' && raw.bot.trim())
+        ? raw.bot.trim()
+        : (typeof raw.owner?.name === 'string' && raw.owner.name.trim())
+          ? raw.owner.name.trim()
+          : (fallbackBot || 'Bot')
+    const botMeta = botMetaByNameLower.get(botName.toLowerCase())
+    const extracted = extractNeedsYouQuestion(raw.question)
+    const replyCount = typeof raw.replyCount === 'number' && raw.replyCount > 0 ? raw.replyCount : extracted.replyCount
+    const title = normalizeNeedsYouText(raw.title, 110) || 'Needs your decision'
+    const num = typeof raw.number === 'number' ? raw.number : null
+    const id = String(raw.uid || raw.id || (num !== null ? `item-${num}` : `${botName}-${idx}`))
+    const updatedAt =
+      typeof raw.updatedAt === 'number'
+        ? raw.updatedAt
+        : (typeof raw.lastActivityAt === 'number' ? raw.lastActivityAt : null)
+    upsertNeedsYou({
+      id,
+      kind: 'item',
+      number: num,
+      bot: botMeta?.name || botName,
+      host: sourceHost,
+      title,
+      question: extracted.question,
+      replyCount,
+      chatId: raw.chatId || raw.chat?.id || null,
+      chatTitle: raw.chatTitle || raw.chat?.title || null,
+      workspaceId: botMeta?.workspaceId ?? null,
+      workspacePath: botMeta?.workspacePath ?? null,
+      terminalId: null,
+      updatedAt
+    })
+  }
+
+  for (const w of trimmedWorkers) {
+    if (w.state !== 'permission') continue
+    const botMeta = w.bot ? botMetaByNameLower.get(w.bot.toLowerCase()) : undefined
+    upsertNeedsYou({
+      id: `perm:${w.host}:${w.id}`,
+      kind: 'permission',
+      number: null,
+      bot: botMeta?.name || w.bot || w.title,
+      host: w.host,
+      title: w.title,
+      question: normalizeNeedsYouText(w.sessionTitle, 110) || 'Worker awaiting permission approval',
+      replyCount: 0,
+      chatId: null,
+      chatTitle: null,
+      workspaceId: w.workspaceId || botMeta?.workspaceId || null,
+      workspacePath: w.workspacePath || botMeta?.workspacePath || null,
+      terminalId: w.terminalId || null,
+      updatedAt: w.lastActivityAt
+    })
+  }
+
+  const needsYou: NeedsYouItem[] = [...dedupedNeedsYou.values()].sort(
+    (a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
+  )
+  const needsYouByBot = new Map<string, NeedsYouItem[]>()
+  for (const ny of needsYou) {
+    const k = ny.bot.toLowerCase()
+    const list = needsYouByBot.get(k) || []
+    list.push(ny)
+    needsYouByBot.set(k, list)
+  }
+
   const bots: BotNodeInfo[] = rawBots.map((b) => {
     const name = b.name || 'Bot'
     const role = classifyRole(name)
@@ -1563,6 +1767,14 @@ export async function collectHqSnapshot(
     else if (home?.unread) state = 'unread'
 
     const workspaceId = home?.worktreeId ?? hostWsByBotName.get(name.toLowerCase()) ?? null
+    const botNeeds = needsYouByBot.get(name.toLowerCase()) || []
+    const topNeed = botNeeds[0] || null
+    const needsYouSummary = topNeed
+      ? (topNeed.kind === 'permission'
+          ? `[PERM] ${topNeed.question || topNeed.title}`
+          : `${topNeed.number !== null ? `#${topNeed.number} ` : ''}${topNeed.question || topNeed.title}`)
+      : null
+
     return {
       id: b.id || name,
       name,
@@ -1583,7 +1795,9 @@ export async function collectHqSnapshot(
       activeDispatchCount,
       activeSessionTitle: pickAgentSummary(bestAgent),
       activeToolName: bestAgent?.state === 'working' ? (bestAgent.toolName || null) : null,
-      lastActivityAt: home?.lastActivityAt ?? null
+      lastActivityAt: home?.lastActivityAt ?? null,
+      needsYouCount: botNeeds.length,
+      needsYouSummary
     }
   })
 
@@ -1596,13 +1810,15 @@ export async function collectHqSnapshot(
     hosts,
     bots,
     workers: trimmedWorkers,
+    needsYou,
     events: eventLog.slice(0, 18),
     summary: {
       totalBots: bots.length,
       workingBots: bots.filter((b) => b.state === 'working').length,
       onlineHosts: hosts.filter((h) => h.online).length,
       activeWorkers: workers.filter((w) => w.state === 'working').length,
-      recentWorkers: trimmedWorkers.length
+      recentWorkers: trimmedWorkers.length,
+      needsYouCount: needsYou.length
     }
   }
 }
@@ -1698,14 +1914,21 @@ export default function activate(
       hubHttpByHost
     )
     latestSnapshot = snap
+    const ny = snap.summary.needsYouCount ?? 0
     const activeTotal = snap.summary.activeWorkers + snap.summary.workingBots
-    const tone = activeTotal > 0 ? 'accent' : 'success'
+    const tone = ny > 0 ? 'warning' : activeTotal > 0 ? 'accent' : 'success'
+    const text =
+      ny > 0
+        ? `HQ · ! ${ny} NEED YOU · ${snap.summary.activeWorkers}W`
+        : `HQ · ${snap.summary.onlineHosts}N · ${snap.summary.activeWorkers}W`
+    const baseTooltip = `${snap.summary.totalBots} Bots (${snap.summary.workingBots} working) · ${snap.summary.onlineHosts} Hosts online · ${snap.summary.activeWorkers} active workers`
+    const tooltip = ny > 0 ? `${ny} item(s) need your decision · ${baseTooltip}` : baseTooltip
     await orca.host
       .call('statusBar.update', {
         id: 'hq-status',
-        text: `HQ · ${snap.summary.onlineHosts}N · ${snap.summary.activeWorkers}W`,
+        text,
         tone,
-        tooltip: `${snap.summary.totalBots} Bots (${snap.summary.workingBots} working) · ${snap.summary.onlineHosts} Hosts online · ${snap.summary.activeWorkers} active workers`
+        tooltip
       })
       .catch(() => {})
     orca.panels.post('hq.snapshot', snap)
@@ -1736,6 +1959,102 @@ export default function activate(
     return { opened: Boolean(res?.opened) }
   })
 
+  const hostMatches = (wHostId: string | null | undefined, targetHost: string): boolean => {
+    if (targetHost === 'local') return !wHostId || wHostId === 'local'
+    if (!wHostId) return false
+    const normW = wHostId.toLowerCase().replace(/^runtime:/, '')
+    const normT = targetHost.toLowerCase().replace(/^runtime:/, '')
+    return normW === normT || wHostId.toLowerCase() === targetHost.toLowerCase()
+  }
+
+  type ListedWorkspace = {
+    id: string
+    kind?: string
+    name: string
+    path?: string
+    branch?: string | null
+    hostId?: string | null
+  }
+
+  const findWorkspaceInList = (
+    allWorkspaces: ListedWorkspace[],
+    candidateId: string | null,
+    candidatePath: string | null,
+    candidateBotName: string | null,
+    candidateTitle: string | null,
+    targetHost: string
+  ): ListedWorkspace | null => {
+    if (allWorkspaces.length === 0) return null
+    if (candidateId) {
+      const exact = allWorkspaces.find((w) => w.id === candidateId)
+      if (exact) return exact
+      const suffix = allWorkspaces.find(
+        (w) =>
+          w.id.endsWith(`:${candidateId}`) ||
+          w.id.endsWith(`::${candidateId}`) ||
+          candidateId.endsWith(`:${w.id}`)
+      )
+      if (suffix) return suffix
+    }
+    if (candidatePath) {
+      const byPathHost = allWorkspaces.find((w) => w.path === candidatePath && hostMatches(w.hostId, targetHost))
+      if (byPathHost) return byPathHost
+      const byPath = allWorkspaces.find((w) => w.path === candidatePath)
+      if (byPath) return byPath
+    }
+    if (candidateBotName) {
+      const lowerBot = candidateBotName.toLowerCase()
+      const byBotHost = allWorkspaces.find(
+        (w) => w.kind === 'folder' && w.name.toLowerCase() === lowerBot && hostMatches(w.hostId, targetHost)
+      )
+      if (byBotHost) return byBotHost
+      const byBot = allWorkspaces.find((w) => w.kind === 'folder' && w.name.toLowerCase() === lowerBot)
+      if (byBot) return byBot
+    }
+    if (candidateTitle) {
+      const cleanTitle = candidateTitle.includes(' / ')
+        ? candidateTitle.split(' / ').slice(-1)[0].trim().toLowerCase()
+        : candidateTitle.trim().toLowerCase()
+      const byTitleHost = allWorkspaces.find(
+        (w) =>
+          hostMatches(w.hostId, targetHost) &&
+          (w.name.toLowerCase() === cleanTitle || (w.branch && w.branch.toLowerCase() === cleanTitle))
+      )
+      if (byTitleHost) return byTitleHost
+    }
+    return null
+  }
+
+  const openResolvedWorkspace = async (
+    resolvedWsId: string,
+    label: string,
+    preferredTermId: string | null
+  ): Promise<OpenSessionOutput | null> => {
+    const opened = await orca.host.call('workspace.open', { workspaceId: resolvedWsId }).catch((err) => {
+      orca.log(`workspace.open(${resolvedWsId}) failed: ${err instanceof Error ? err.message : String(err)}`)
+      return null
+    })
+    let targetTerm = preferredTermId && preferredTermId.startsWith('term_') ? preferredTermId : null
+    if (!targetTerm) {
+      const agentsRes = await orca.host.call('agents.list', { workspaceId: resolvedWsId }).catch(() => null)
+      const activeAgent = agentsRes?.agents?.find((a) => a.terminalId && a.state === 'working')
+        || agentsRes?.agents?.find((a) => a.terminalId)
+      if (activeAgent?.terminalId) targetTerm = activeAgent.terminalId
+    }
+    if (targetTerm) {
+      const foc = await orca.host.call('terminal.focus', { terminalId: targetTerm }).catch(() => null)
+      if (foc?.focused) {
+        pushLog('workspace', `FOCUSED SESSION :: ${label}`)
+        return { opened: true, mode: 'focused', detail: 'Focused live Orca session pane' }
+      }
+    }
+    if (opened?.opened) {
+      pushLog('workspace', `OPENED WORKSPACE :: ${label}`)
+      return { opened: true, mode: 'opened', detail: `Opened ${label} in Orca` }
+    }
+    return null
+  }
+
   const handleOpenSession = async (input: OpenSessionInput): Promise<OpenSessionOutput> => {
     const host = input?.host || 'local'
     const wsId = input?.workspaceId || null
@@ -1746,96 +2065,10 @@ export default function activate(
     const fallbackWs = input?.fallbackWorkspaceId || null
 
     const listRes = await orca.host.call('workspace.list', { includeStatus: false }).catch(() => null)
-    const allWorkspaces = listRes?.workspaces ?? []
-
-    const hostMatches = (wHostId: string | null | undefined, targetHost: string): boolean => {
-      if (targetHost === 'local') return !wHostId || wHostId === 'local'
-      if (!wHostId) return false
-      const normW = wHostId.toLowerCase().replace(/^runtime:/, '')
-      const normT = targetHost.toLowerCase().replace(/^runtime:/, '')
-      return normW === normT || wHostId.toLowerCase() === targetHost.toLowerCase()
-    }
-
-    const findWorkspaceInHostList = (
-      candidateId: string | null,
-      candidatePath: string | null,
-      candidateBotName: string | null,
-      candidateTitle: string | null,
-      targetHost: string
-    ) => {
-      if (allWorkspaces.length === 0) return null
-      if (candidateId) {
-        const exact = allWorkspaces.find((w) => w.id === candidateId)
-        if (exact) return exact
-        const suffix = allWorkspaces.find(
-          (w) =>
-            w.id.endsWith(`:${candidateId}`) ||
-            w.id.endsWith(`::${candidateId}`) ||
-            candidateId.endsWith(`:${w.id}`)
-        )
-        if (suffix) return suffix
-      }
-      if (candidatePath) {
-        const byPathHost = allWorkspaces.find((w) => w.path === candidatePath && hostMatches(w.hostId, targetHost))
-        if (byPathHost) return byPathHost
-        const byPath = allWorkspaces.find((w) => w.path === candidatePath)
-        if (byPath) return byPath
-      }
-      if (candidateBotName) {
-        const lowerBot = candidateBotName.toLowerCase()
-        const byBotHost = allWorkspaces.find(
-          (w) => w.kind === 'folder' && w.name.toLowerCase() === lowerBot && hostMatches(w.hostId, targetHost)
-        )
-        if (byBotHost) return byBotHost
-        const byBot = allWorkspaces.find((w) => w.kind === 'folder' && w.name.toLowerCase() === lowerBot)
-        if (byBot) return byBot
-      }
-      if (candidateTitle) {
-        const cleanTitle = candidateTitle.includes(' / ')
-          ? candidateTitle.split(' / ').slice(-1)[0].trim().toLowerCase()
-          : candidateTitle.trim().toLowerCase()
-        const byTitleHost = allWorkspaces.find(
-          (w) =>
-            hostMatches(w.hostId, targetHost) &&
-            (w.name.toLowerCase() === cleanTitle || (w.branch && w.branch.toLowerCase() === cleanTitle))
-        )
-        if (byTitleHost) return byTitleHost
-      }
-      return null
-    }
-
-    const openResolvedWorkspace = async (
-      resolvedWsId: string,
-      label: string,
-      preferredTermId: string | null
-    ): Promise<OpenSessionOutput | null> => {
-      const opened = await orca.host.call('workspace.open', { workspaceId: resolvedWsId }).catch((err) => {
-        orca.log(`workspace.open(${resolvedWsId}) failed: ${err instanceof Error ? err.message : String(err)}`)
-        return null
-      })
-      let targetTerm = preferredTermId && preferredTermId.startsWith('term_') ? preferredTermId : null
-      if (!targetTerm) {
-        const agentsRes = await orca.host.call('agents.list', { workspaceId: resolvedWsId }).catch(() => null)
-        const activeAgent = agentsRes?.agents?.find((a) => a.terminalId && a.state === 'working')
-          || agentsRes?.agents?.find((a) => a.terminalId)
-        if (activeAgent?.terminalId) targetTerm = activeAgent.terminalId
-      }
-      if (targetTerm) {
-        const foc = await orca.host.call('terminal.focus', { terminalId: targetTerm }).catch(() => null)
-        if (foc?.focused) {
-          pushLog('workspace', `FOCUSED SESSION :: ${label}`)
-          return { opened: true, mode: 'focused', detail: 'Focused live Orca session pane' }
-        }
-      }
-      if (opened?.opened) {
-        pushLog('workspace', `OPENED WORKSPACE :: ${label}`)
-        return { opened: true, mode: 'opened', detail: `Opened ${label} in Orca` }
-      }
-      return null
-    }
+    const allWorkspaces = (listRes?.workspaces ?? []) as ListedWorkspace[]
 
     // 1. Try resolving directly against this Orca window's workspace.list (works for local AND directly paired remote workspaces)
-    const matched = findWorkspaceInHostList(wsId, wsPath, botName, title, host)
+    const matched = findWorkspaceInList(allWorkspaces, wsId, wsPath, botName, title, host)
     if (matched) {
       const res = await openResolvedWorkspace(matched.id, matched.name || wsPath || matched.id, host === 'local' ? termId : null)
       if (res) return res
@@ -1883,7 +2116,7 @@ export default function activate(
 
     // 5. Fallback to opening the dispatching parent Bot in this Orca window (always helpful for relayed workers not directly paired locally)
     if (fallbackWs || (!matched && botName)) {
-      const fbMatch = findWorkspaceInHostList(fallbackWs, null, botName, null, host)
+      const fbMatch = findWorkspaceInList(allWorkspaces, fallbackWs, null, botName, null, host)
       const fbId = fbMatch?.id || fallbackWs
       if (fbId) {
         const fb = await orca.host.call('workspace.open', { workspaceId: fbId }).catch(() => null)
@@ -1913,6 +2146,89 @@ export default function activate(
         ? 'No matching local session'
         : `Not paired in this Orca window (${host})`
     }
+  }
+
+  const handleOpenTasksView = async (): Promise<OpenNeedsYouOutput> => {
+    try {
+      const res = await orca.host.call('commands.run', { action: 'view.tasks' })
+      const failed =
+        res && typeof res === 'object' &&
+        ((res as { ok?: boolean }).ok === false || (res as { ran?: boolean }).ran === false)
+      if (!failed) {
+        pushLog('system', 'OPENED ORCA TASKS / NEEDS YOU QUEUE')
+        return { opened: true, mode: 'tasks', detail: 'Opened Orca Tasks / Needs You queue' }
+      }
+    } catch (err) {
+      orca.log(`commands.run(view.tasks) failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    return { opened: false, mode: 'none', detail: 'Unable to open Orca Tasks queue' }
+  }
+
+  const handleOpenNeedsYou = async (input: OpenNeedsYouInput): Promise<OpenNeedsYouOutput> => {
+    const host = input?.host || 'local'
+    const botName = input?.botName || null
+    const wsId = input?.workspaceId || null
+    const wsPath = input?.workspacePath || null
+    const chatTitle = input?.chatTitle || null
+    const termId = input?.terminalId || null
+    const kind = input?.kind || 'item'
+
+    // 1. Permission-blocked worker with live terminal -> focus directly first
+    if (kind === 'permission') {
+      if (termId && termId.startsWith('term_')) {
+        const foc = await orca.host.call('terminal.focus', { terminalId: termId }).catch(() => null)
+        if (foc?.focused) {
+          pushLog('workspace', `FOCUSED PERMISSION WORKER :: ${botName || termId}`)
+          return { opened: true, mode: 'focused', detail: 'Focused worker awaiting permission' }
+        }
+      }
+      const sess = await handleOpenSession({
+        workspaceId: wsId,
+        workspacePath: wsPath,
+        botName,
+        host,
+        terminalId: termId
+      })
+      if (sess.opened) return sess
+    }
+
+    // 2. Try resolving in this Orca window's workspace.list (prefer matching group chat folder, then Bot folder)
+    const listRes = await orca.host.call('workspace.list', { includeStatus: false }).catch(() => null)
+    const allWorkspaces = (listRes?.workspaces ?? []) as ListedWorkspace[]
+    let matched: ListedWorkspace | null = null
+    if (chatTitle && allWorkspaces.length > 0) {
+      const lowerChat = chatTitle.trim().toLowerCase()
+      matched =
+        allWorkspaces.find(
+          (w) => w.kind === 'folder' && w.name.toLowerCase() === lowerChat && hostMatches(w.hostId, host)
+        ) ||
+        allWorkspaces.find((w) => w.kind === 'folder' && w.name.toLowerCase() === lowerChat) ||
+        null
+    }
+    if (!matched) {
+      matched = findWorkspaceInList(allWorkspaces, wsId, wsPath, botName, null, host)
+    }
+    if (matched) {
+      const res = await openResolvedWorkspace(
+        matched.id,
+        matched.name || chatTitle || botName || matched.id,
+        host === 'local' ? termId : null
+      )
+      if (res) return res
+    }
+
+    // 3. Seamless fallback to Orca's built-in Tasks / Needs You queue (works across unpaired remote Bots)
+    const tasksRes = await handleOpenTasksView()
+    if (tasksRes.opened) return tasksRes
+
+    // 4. Final fallback to handleOpenSession (headless / non-desktop)
+    return handleOpenSession({
+      workspaceId: wsId,
+      workspacePath: wsPath,
+      botName,
+      host,
+      terminalId: termId
+    })
   }
 
   const pendingVideoUploads = new Map<
@@ -2087,7 +2403,41 @@ export default function activate(
         void readJsonBody(req)
           .then(async (body) => {
             const out = await handleOpenSession((body || {}) as OpenSessionInput)
-            if (out.opened) {
+            if (out.opened && os.platform() === 'darwin') {
+              await execFileAsync('open', ['-a', 'Orca'], { timeout: 2500 }).catch(() => null)
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify(out))
+          })
+          .catch(() => {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end('{"opened":false,"mode":"none","detail":"Bad request"}')
+          })
+        return
+      }
+
+      if (pathname === '/api/open-needs-you' && req.method === 'POST') {
+        void readJsonBody(req)
+          .then(async (body) => {
+            const out = await handleOpenNeedsYou((body || {}) as OpenNeedsYouInput)
+            if (out.opened && os.platform() === 'darwin') {
+              await execFileAsync('open', ['-a', 'Orca'], { timeout: 2500 }).catch(() => null)
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify(out))
+          })
+          .catch(() => {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end('{"opened":false,"mode":"none","detail":"Bad request"}')
+          })
+        return
+      }
+
+      if (pathname === '/api/open-tasks-view' && req.method === 'POST') {
+        void readJsonBody(req)
+          .then(async () => {
+            const out = await handleOpenTasksView()
+            if (out.opened && os.platform() === 'darwin') {
               await execFileAsync('open', ['-a', 'Orca'], { timeout: 2500 }).catch(() => null)
             }
             res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
@@ -2128,6 +2478,8 @@ export default function activate(
   }
 
   orca.panels.handle('hq.openSession', handleOpenSession)
+  orca.panels.handle('hq.openNeedsYou', handleOpenNeedsYou)
+  orca.panels.handle('hq.openTasksView', handleOpenTasksView)
   orca.panels.handle('hq.saveVideo', handleSaveVideo)
   orca.panels.handle('hq.getSaveEndpoint', async (): Promise<SaveEndpointOutput> => {
     try {
