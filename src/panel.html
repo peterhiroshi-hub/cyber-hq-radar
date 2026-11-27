@@ -2077,14 +2077,52 @@
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
 
+  async function saveVideoViaLoopback(cleanBase64, outMime, fname) {
+    if (!orca || !orca.plugin) return null;
+    try {
+      const ep = await apiRequest('hq.getSaveEndpoint');
+      if (!ep || !ep.url) return null;
+      recBtn.textContent = 'SAVING...';
+      // Send JSON as text/plain (CORS simple request, zero preflight) authenticated by per-session 128-bit token
+      const resp = await fetch(ep.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+        body: JSON.stringify({
+          base64: cleanBase64,
+          mimeType: outMime,
+          filename: fname,
+          reveal: true
+        })
+      });
+      if (!resp.ok) return null;
+      const parsed = await resp.json();
+      if (parsed && parsed.saved) return parsed;
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
   async function saveVideoChunked(base64Raw, outMime, fname) {
     const clean = String(base64Raw || '').replace(/^data:[^,]*;base64,/i, '');
     if (!clean) throw new Error('Empty encoded video payload');
     const viaOrcaIpc = Boolean(orca && orca.plugin);
-    // Orca panel IPC enforces a strict 64 KiB JSON frame limit (payload + RPC envelope).
-    // Use 32 KiB base64 chunks (~33 KiB total JSON frame) with adaptive halving down to 8 KiB.
-    let chunkSize = viaOrcaIpc ? (32 * 1024) : (256 * 1024);
+
+    // Fast path for Orca sidebar: 1 IPC call to get loopback endpoint + 1 direct localhost POST
+    // Avoids Orca's 64 KiB IPC frame cap AND host rate limiter ("Too many requests.") completely.
+    if (viaOrcaIpc) {
+      const fastRes = await saveVideoViaLoopback(clean, outMime, fname);
+      if (fastRes && fastRes.saved) return fastRes;
+    }
+
+    // CSP-safe fallback over Orca panel IPC:
+    // - 56 KiB base64 chunks (~57.7 KiB total JSON-RPC frame, strictly below 64 KiB cap)
+    // - Paced inter-chunk throttling + exponential backoff retry on "Too many requests."
+    // - Adaptive chunk-size halving if a host enforces a tighter frame cap
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    let chunkSize = viaOrcaIpc ? (56 * 1024) : (256 * 1024);
     const minChunkSize = 8 * 1024;
+    let paceMs = viaOrcaIpc ? 75 : 0;
 
     while (true) {
       if (clean.length <= chunkSize) {
@@ -2111,6 +2149,7 @@
       let retrySmaller = false;
 
       for (let i = 0; i < totalChunks; i++) {
+        if (paceMs > 0 && i > 0) await sleep(paceMs);
         const pct = Math.min(99, Math.round(((i + 1) / totalChunks) * 100));
         recBtn.textContent = 'SAVING ' + pct + '%';
         const slice = clean.slice(i * chunkSize, (i + 1) * chunkSize);
@@ -2131,17 +2170,31 @@
               totalChunks,
               base64: slice
             };
-        try {
-          lastRes = await apiRequest('hq.saveVideo', payload);
-        } catch (err) {
-          const msg = err && err.message ? err.message : String(err || '');
-          if (viaOrcaIpc && i === 0 && chunkSize > minChunkSize && /size limit|too large|payload/i.test(msg)) {
-            chunkSize = Math.max(minChunkSize, Math.floor(chunkSize / 2));
-            retrySmaller = true;
+
+        let attempt = 0;
+        while (true) {
+          try {
+            lastRes = await apiRequest('hq.saveVideo', payload);
             break;
+          } catch (err) {
+            const msg = err && err.message ? err.message : String(err || '');
+            if (viaOrcaIpc && i === 0 && chunkSize > minChunkSize && /size limit|too large|payload/i.test(msg)) {
+              chunkSize = Math.max(minChunkSize, Math.floor(chunkSize / 2));
+              retrySmaller = true;
+              break;
+            }
+            if (viaOrcaIpc && /too many requests|rate.?limit|429|throttl/i.test(msg) && attempt < 7) {
+              attempt += 1;
+              paceMs = Math.min(450, Math.max(140, Math.round(paceMs * 1.6)));
+              const backoffMs = Math.min(4000, 350 * Math.pow(2, attempt - 1));
+              recBtn.textContent = 'SAVING ' + pct + '%…';
+              await sleep(backoffMs);
+              continue;
+            }
+            throw err;
           }
-          throw err;
         }
+        if (retrySmaller) break;
         if (!lastRes || (!isLast && !lastRes.chunkAccepted && !lastRes.saved)) {
           throw new Error(lastRes?.error || 'Chunk upload rejected');
         }
@@ -2852,7 +2905,7 @@
         let tickTimer = null;
         let safetyTimer = null;
         try {
-          const opts = { videoBitsPerSecond: 4500000 };
+          const opts = { videoBitsPerSecond: 3400000 };
           if (mimeType) opts.mimeType = mimeType;
           const recorder = new MediaRecorder(stream, opts);
           recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };

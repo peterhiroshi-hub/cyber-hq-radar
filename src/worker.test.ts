@@ -878,7 +878,9 @@ test('chunked hq.saveVideo stays strictly under Orca 64 KiB IPC frame limit acro
   const { fileURLToPath } = await import('node:url')
   const panelPath = fileURLToPath(new URL('./panel.html', import.meta.url).href)
   const panelHtml = await fs.readFile(panelPath, 'utf8')
-  assert.match(panelHtml, /let chunkSize = viaOrcaIpc \? \(32 \* 1024\) : \(256 \* 1024\)/)
+  assert.match(panelHtml, /apiRequest\('hq\.getSaveEndpoint'\)/)
+  assert.match(panelHtml, /let chunkSize = viaOrcaIpc \? \(56 \* 1024\) : \(256 \* 1024\)/)
+  assert.match(panelHtml, /too many requests\|rate\.\?limit\|429\|throttl/i)
 
   const host = mockHost({
     results: {
@@ -909,9 +911,10 @@ test('chunked hq.saveVideo stays strictly under Orca 64 KiB IPC frame limit acro
   const worker = await mountWorker(mod, { host })
 
   const IPC_LIMIT_BYTES = 64 * 1024
-  const CHUNK_SIZE = 32 * 1024
+  const CHUNK_SIZE = 56 * 1024
 
   // Perform 2 consecutive chunked uploads simulating Orca's strict 64 KiB JSON-RPC frame cap
+  // and verifying idempotent chunk retry after a transient rate-limit error
   for (let run = 1; run <= 2; run++) {
     const rawBytes = Buffer.alloc(180 * 1024, run === 1 ? 0x41 : 0x42)
     const b64 = rawBytes.toString('base64')
@@ -953,6 +956,63 @@ test('chunked hq.saveVideo stays strictly under Orca 64 KiB IPC frame limit acro
   assert.equal(savedPayloads[1].bytes.length, 180 * 1024)
   assert.equal(savedPayloads[0].bytes[0], 0x41)
   assert.equal(savedPayloads[1].bytes[0], 0x42)
+
+  // Fast loopback endpoint: 1 IPC call -> single-request CORS-safe localhost POST (zero IPC rate limit)
+  const ep = await worker.request('hq.getSaveEndpoint')
+  assert.ok(ep.url && ep.url.startsWith('http://127.0.0.1:'))
+  assert.ok(ep.token && ep.token.length >= 32)
+
+  const http = await import('node:http')
+  const postJsonText = (targetUrl: string, body: string) =>
+    new Promise<{ status: number; cors: string; body: string }>((resolve, reject) => {
+      const req = http.request(
+        targetUrl,
+        { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=UTF-8' } },
+        (res) => {
+          let raw = ''
+          res.on('data', (c) => { raw += String(c) })
+          res.on('end', () => {
+            const cors = res.headers['access-control-allow-origin']
+            resolve({
+              status: res.statusCode || 0,
+              cors: Array.isArray(cors) ? cors[0] : (cors || ''),
+              body: raw
+            })
+          })
+        }
+      )
+      req.on('error', reject)
+      req.write(body)
+      req.end()
+    })
+
+  // Unauthorized request without token must be rejected with 403
+  const noTokUrl = ep.url.split('?')[0]
+  const denied = await postJsonText(noTokUrl, '{}')
+  assert.equal(denied.status, 403)
+
+  // Two consecutive full-payload loopback POST exports succeed in 1 request each
+  for (let n = 1; n <= 2; n++) {
+    const rawBuf = Buffer.alloc(240 * 1024, n === 1 ? 0x51 : 0x52)
+    const res = await postJsonText(
+      ep.url,
+      JSON.stringify({
+        base64: rawBuf.toString('base64'),
+        mimeType: 'video/mp4;codecs=avc1.640028',
+        filename: `loopback-fast-${n}.mp4`,
+        reveal: true
+      })
+    )
+    assert.equal(res.status, 200)
+    assert.equal(res.cors, '*')
+    const parsed = JSON.parse(res.body) as { saved: boolean; bytes: number }
+    assert.equal(parsed.saved, true)
+    assert.equal(parsed.bytes, rawBuf.length)
+  }
+
+  assert.equal(savedPayloads.length, 4)
+  assert.equal(savedPayloads[2].bytes[0], 0x51)
+  assert.equal(savedPayloads[3].bytes[0], 0x52)
 
   await worker.deactivate()
 })

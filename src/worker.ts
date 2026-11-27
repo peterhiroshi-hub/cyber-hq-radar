@@ -20,6 +20,7 @@ import type {
   OpenSessionInput,
   OpenSessionOutput,
   OpenWallOutput,
+  SaveEndpointOutput,
   SaveVideoInput,
   SaveVideoOutput,
   WorkerNodeInfo
@@ -1720,8 +1721,21 @@ export default function activate(
       }
       const hdrTok = req.headers['x-hq-token']
       const tok = params.get('token') || (Array.isArray(hdrTok) ? hdrTok[0] : hdrTok) || ''
+      const saveCorsHeaders: Record<string, string> = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, X-HQ-Token'
+      }
+      if (pathname === '/api/save-video' && req.method === 'OPTIONS') {
+        res.writeHead(204, saveCorsHeaders)
+        res.end('')
+        return
+      }
       if (tok !== wallToken) {
-        res.writeHead(403, { 'Content-Type': 'text/plain' })
+        const denyHeaders: Record<string, string> = pathname === '/api/save-video'
+          ? { 'Content-Type': 'text/plain', ...saveCorsHeaders }
+          : { 'Content-Type': 'text/plain' }
+        res.writeHead(403, denyHeaders)
         res.end('Forbidden')
         return
       }
@@ -1800,11 +1814,11 @@ export default function activate(
         void readJsonBody(req)
           .then(async (body) => {
             const out = await handleSaveVideo((body || {}) as SaveVideoInput)
-            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...saveCorsHeaders })
             res.end(JSON.stringify(out))
           })
           .catch(() => {
-            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.writeHead(400, { 'Content-Type': 'application/json', ...saveCorsHeaders })
             res.end('{"saved":false,"path":null,"bytes":0,"format":"webm","error":"Bad request"}')
           })
         return
@@ -1825,6 +1839,24 @@ export default function activate(
 
   orca.panels.handle('hq.openSession', handleOpenSession)
   orca.panels.handle('hq.saveVideo', handleSaveVideo)
+  orca.panels.handle('hq.getSaveEndpoint', async (): Promise<SaveEndpointOutput> => {
+    try {
+      await ensureWallServer()
+      if (!wallPort || !wallToken) {
+        return { url: null, token: null, error: 'Loopback save server unavailable' }
+      }
+      return {
+        url: `http://127.0.0.1:${wallPort}/api/save-video?token=${encodeURIComponent(wallToken)}`,
+        token: wallToken
+      }
+    } catch (err) {
+      return {
+        url: null,
+        token: null,
+        error: err instanceof Error ? err.message : 'Failed to start loopback save server'
+      }
+    }
+  })
   orca.panels.handle('hq.openFullscreenWall', async (): Promise<OpenWallOutput> => {
     try {
       const url = await ensureWallServer()

@@ -139,6 +139,12 @@ export type OpenWallOutput = {
   error?: string
 }
 
+export type SaveEndpointOutput = {
+  url: string | null
+  token: string | null
+  error?: string
+}
+
 declare module 'orca' {
   interface PluginRequests {
     'hq.getSnapshot': { output: HqSnapshot }
@@ -146,6 +152,7 @@ declare module 'orca' {
     'hq.openWorkspace': { input: { workspaceId: string }; output: { opened: boolean } }
     'hq.openSession': { input: OpenSessionInput; output: OpenSessionOutput }
     'hq.saveVideo': { input: SaveVideoInput; output: SaveVideoOutput }
+    'hq.getSaveEndpoint': { output: SaveEndpointOutput }
     'hq.openFullscreenWall': { output: OpenWallOutput }
   }
   interface PluginPanelEvents {
