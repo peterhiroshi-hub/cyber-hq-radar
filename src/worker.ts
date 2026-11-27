@@ -548,6 +548,13 @@ export function classifyRole(name: string | null | undefined): BotRole {
   return 'other'
 }
 
+export function stripOsHomePrefix(rawPath: string | null | undefined): string {
+  const s = String(rawPath || '')
+  const wsIdx = s.toLowerCase().indexOf('/workspaces/')
+  if (wsIdx >= 0) return s.slice(wsIdx + '/workspaces/'.length)
+  return s.replace(/^\/(?:Users|home)\/[^/]+\/?/i, '')
+}
+
 export function classifySquad(name: string | null | undefined, knownSquads?: Iterable<string>): BotSquad {
   const raw = (name || '').trim()
   if (!raw) return 'fleet'
@@ -557,7 +564,7 @@ export function classifySquad(name: string | null | undefined, knownSquads?: Ite
     const tokens = lower.split(/[^a-z0-9]+/).filter((t) => t.length >= 3)
     for (const sq of knownSquads) {
       if (!sq || sq === 'command' || sq === 'fleet') continue
-      if (lower.includes(sq)) return sq
+      if (tokens.includes(sq) || lower.includes(sq)) return sq
       // Match abbreviated repo/ticket prefixes (e.g. 4+ char prefix of a known squad name)
       if (tokens.some((t) => t.length >= 4 && sq.startsWith(t))) return sq
     }
@@ -1036,14 +1043,43 @@ export async function collectHqSnapshot(
     return null
   }
 
+  // Track each host's immediate parent hub ('local' for direct paired hosts, hub.envName for relayed downstream hosts)
+  const parentHubByHost = new Map<string, HostId>()
+  for (const r of directRemoteResults) {
+    parentHubByHost.set(r.envName, 'local')
+  }
+  for (const r of relayedResults) {
+    if (r.viaHub) {
+      const rootHub = r.viaHub.split('→')[0]?.trim() || r.viaHub
+      parentHubByHost.set(r.envName, rootHub)
+    }
+  }
+
   const knownSquads = new Set<string>(rawBots.map((b) => classifySquad(b.name)))
 
-  // Helper to match a worker with a Bot when crossStoreParent was not set
-  const inferBotFromKnownBots = (squad: BotSquad, hint: string, explicitBot: string | null): string | null => {
+  // Helper to match a worker with a Bot when crossStoreParent was not set, scoped to Bots that can reach hostId
+  const inferBotFromKnownBots = (
+    squad: BotSquad,
+    hint: string,
+    explicitBot: string | null,
+    workerHostId?: HostId
+  ): string | null => {
     if (explicitBot) return explicitBot
     const h = hint.toLowerCase()
     const isQa = h.includes('qa') || h.includes('review') || h.includes('audit')
-    const sameSquad = rawBots.filter((b) => classifySquad(b.name) === squad)
+    const allowedOwnerHosts = new Set<HostId>()
+    if (workerHostId) {
+      allowedOwnerHosts.add(workerHostId)
+      const parentHub = parentHubByHost.get(workerHostId)
+      if (parentHub) allowedOwnerHosts.add(parentHub)
+      else if (workerHostId !== 'local') allowedOwnerHosts.add(controlHostId)
+    }
+    const hostEligible = (b: RawBot) => {
+      if (allowedOwnerHosts.size === 0) return true
+      const owner = botHostByName.get(b.name || '') || controlHostId
+      return allowedOwnerHosts.has(owner)
+    }
+    const sameSquad = rawBots.filter((b) => classifySquad(b.name) === squad && hostEligible(b))
     if (sameSquad.length > 0) {
       const preferred = sameSquad.find((b) => {
         const r = classifyRole(b.name)
@@ -1053,7 +1089,7 @@ export async function collectHqSnapshot(
       if (sameSquad[0]?.name) return sameSquad[0].name
     }
     if (squad === 'command') {
-      const cmd = rawBots.find((b) => classifyRole(b.name) === 'copilot')
+      const cmd = rawBots.find((b) => classifyRole(b.name) === 'copilot' && hostEligible(b))
       if (cmd?.name) return cmd.name
     }
     return null
@@ -1073,8 +1109,9 @@ export async function collectHqSnapshot(
       const host = resolveHostId(row.hostId)
       const parentWsKey = row.crossStoreParent?.parent?.workspaceKey || null
       const parentBotName = (parentWsKey && botNameByWorkspaceId.get(parentWsKey)) || row.bot || null
-      const squad = classifySquad(parentBotName || `${row.repo || ''} ${row.branch || ''} ${row.path || ''}`, knownSquads)
-      const bot = inferBotFromKnownBots(squad, `${row.displayName || ''} ${row.branch || ''}`, parentBotName)
+      const cleanLocalPath = stripOsHomePrefix(row.path)
+      const squad = classifySquad(parentBotName || `${row.displayName || ''} ${row.repo || ''} ${row.branch || ''} ${cleanLocalPath}`, knownSquads)
+      const bot = inferBotFromKnownBots(squad, `${row.displayName || ''} ${row.branch || ''}`, parentBotName, host)
       workers.push({
         id: wtId || `${row.repo}:${row.displayName}`,
         title: row.displayName || row.branch || row.repo || 'workspace',
@@ -1117,8 +1154,9 @@ export async function collectHqSnapshot(
 
       const parentWsKey = matchedPs?.crossStoreParent?.parent?.workspaceKey || null
       const parentBotName = (parentWsKey ? botNameByWorkspaceId.get(parentWsKey) : null) || matchedPs?.bot || null
-      const squad = classifySquad(parentBotName || `${matchedPs?.repo || ''} ${wsPath} ${shortName}`, knownSquads)
-      const bot = inferBotFromKnownBots(squad, `${envName} ${shortName} ${wsPath}`, parentBotName)
+      const cleanRemotePath = stripOsHomePrefix(wsPath)
+      const squad = classifySquad(parentBotName || `${shortName} ${matchedPs?.repo || ''} ${cleanRemotePath}`, knownSquads)
+      const bot = inferBotFromKnownBots(squad, `${envName} ${shortName} ${cleanRemotePath}`, parentBotName, envName)
 
       workers.push({
         id: w.dispatchId || ws || shortName,
@@ -1153,8 +1191,9 @@ export async function collectHqSnapshot(
       if (mapped !== 'working' && workers.filter((x) => x.host === envName).length >= 5) continue
       const parentWsKey = rps.crossStoreParent?.parent?.workspaceKey || null
       const parentBotName = (parentWsKey ? botNameByWorkspaceId.get(parentWsKey) : null) || rps.bot || null
-      const squad = classifySquad(parentBotName || `${rps.repo || ''} ${rps.path || ''}`, knownSquads)
-      const bot = inferBotFromKnownBots(squad, `${envName} ${rps.displayName || ''} ${rps.path || ''}`, parentBotName)
+      const cleanRpsPath = stripOsHomePrefix(rps.path)
+      const squad = classifySquad(parentBotName || `${rps.displayName || ''} ${rps.repo || ''} ${cleanRpsPath}`, knownSquads)
+      const bot = inferBotFromKnownBots(squad, `${envName} ${rps.displayName || ''} ${cleanRpsPath}`, parentBotName, envName)
       workers.push({
         id: ws,
         title: rps.displayName || rps.branch || rps.repo || 'workspace',
@@ -1247,8 +1286,16 @@ export async function collectHqSnapshot(
     })
   }
 
-  const gpuHostId = hosts.find((h) => h.metrics?.gpu)?.id || null
-  const nonCtrlNonGpuHostId = hosts.find((h) => !h.isControlPlane && h.id !== gpuHostId)?.id || null
+  // Scope heuristic GPU/QA routing strictly to non-control compute nodes attached to each Bot's own host
+  const computeChildrenForHost = (ownerHostId: HostId) =>
+    hosts.filter((h) => {
+      if (h.isControlPlane || h.id === ownerHostId) return false
+      const parentHub = parentHubByHost.get(h.id)
+      if (parentHub === ownerHostId) return true
+      // Remote console mode (showLocalHost=false, single control host with direct sibling workers)
+      if (!includeLocal && ownerHostId === controlHostId && parentHub === 'local') return true
+      return false
+    })
 
   const bots: BotNodeInfo[] = rawBots.map((b) => {
     const name = b.name || 'Bot'
@@ -1259,14 +1306,17 @@ export async function collectHqSnapshot(
     const botWorkers = workers.filter((w) => w.bot === name)
     const activeDispatchCount = botWorkers.filter((w) => w.state === 'working').length
 
-    // Dynamic host routing based on actual observed workers, then cluster capability heuristics
+    // Dynamic host routing based on actual observed workers, then host-scoped compute children heuristics
     const observedHosts = [...new Set(botWorkers.map((w) => w.host))]
     let primaryHost: HostId = observedHosts[0] || actualBotHost
     let secondaryHost: HostId | null = observedHosts[1] || null
     if (observedHosts.length === 0) {
-      if (role === 'delivery' && gpuHostId) primaryHost = gpuHostId
-      else if (role === 'qa' && nonCtrlNonGpuHostId) {
-        primaryHost = nonCtrlNonGpuHostId
+      const children = computeChildrenForHost(actualBotHost)
+      const scopedGpuHost = children.find((h) => h.metrics?.gpu)?.id || null
+      const scopedQaHost = children.find((h) => h.id !== scopedGpuHost)?.id || null
+      if (role === 'delivery' && scopedGpuHost) primaryHost = scopedGpuHost
+      else if (role === 'qa' && scopedQaHost) {
+        primaryHost = scopedQaHost
         secondaryHost = actualBotHost
       }
     }

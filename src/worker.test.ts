@@ -718,3 +718,115 @@ test('auto-discovers Tailscale hub relay with zero config and accurately attribu
 
   await worker.deactivate()
 })
+
+test('isolates QA/Delivery routing per host domain and prevents OS username path collisions across hosts', async () => {
+  const host = mockHost({
+    results: {
+      'settings.get': { settings: {} },
+      'workspace.list': { workspaces: [], truncated: false }
+    }
+  })
+
+  const mockCli: CliRunner = async (args) => {
+    if (args[0] === 'environment' && args[1] === 'list') {
+      return {
+        environments: [
+          { id: 'env-hub', name: 'hub-mac', endpoints: [{ endpoint: 'ws://100.80.1.2:6768' }] }
+        ]
+      }
+    }
+    if (args[0] === 'bot' && args[1] === 'list' && !args.includes('--environment')) {
+      return {
+        bots: [
+          { id: 'b-mqa', name: 'Studio QA', agent: 'opencode', chats: { count: 2 } },
+          { id: 'b-alex', name: 'Alex Local Bot', agent: 'antigravity', chats: { count: 1 } },
+          { id: 'b-adel', name: 'Alpha Delivery', agent: 'antigravity', chats: { count: 4 } },
+          { id: 'b-aqa', name: 'Alpha QA', agent: 'antigravity', chats: { count: 3 } }
+        ]
+      }
+    }
+    if (args[0] === 'worktree' && args[1] === 'ps' && !args.includes('--environment')) {
+      return {
+        worktrees: [
+          { worktreeId: 'folder:mqa', repo: 'Bots', bot: 'Studio QA', botHome: true, status: 'idle', lastActivityAt: 100 },
+          { worktreeId: 'folder:alex', repo: 'Bots', bot: 'Alex Local Bot', botHome: true, status: 'idle', lastActivityAt: 100 }
+        ]
+      }
+    }
+    if (args[0] === 'orchestration' && args[1] === 'worker-list' && args.includes('hub-mac')) {
+      return {
+        workers: [
+          {
+            dispatchId: 'ctx_hub_fe',
+            state: 'succeeded',
+            liveness: 'exited',
+            agent: 'antigravity',
+            workspace: 'r1::/Users/alex/orca/workspaces/frontend/alph-490-frontend'
+          }
+        ]
+      }
+    }
+    return { workers: [], worktrees: [] }
+  }
+
+  const mockMetrics: MetricsRunner = async (hostId) => {
+    if (hostId !== 'local') return null
+    return { cpuPct: 20, ramPct: 50, ramUsedGb: 32, ramTotalGb: 64, diskPct: 70, diskFreeGb: 100, load1: 2.0, cores: 16, osName: 'macOS', gpu: null }
+  }
+
+  const mockHubHttp: HubRelayClient = {
+    async fetchSnapshot() {
+      return {
+        ok: true,
+        host: {
+          hostname: 'hub-mac',
+          metrics: { cpuPct: 18, ramPct: 52, ramUsedGb: 8.3, ramTotalGb: 16, diskPct: 75, diskFreeGb: 45, load1: 1.3, cores: 10, osName: 'macOS', gpu: null },
+          bots: [
+            { id: 'b-adel', name: 'Alpha Delivery', agent: 'antigravity' },
+            { id: 'b-aqa', name: 'Alpha QA', agent: 'antigravity' }
+          ],
+          worktrees: []
+        },
+        children: [
+          {
+            env: { id: 'c-qa', name: 'qa-linux', endpoints: [{ endpoint: 'ws://100.80.2.5:6768' }] },
+            envName: 'qa-linux',
+            ok: true,
+            workers: [],
+            remotePs: [],
+            metrics: { cpuPct: 12, ramPct: 30, ramUsedGb: 4.5, ramTotalGb: 15, diskPct: 20, diskFreeGb: 60, load1: 0.8, cores: 16, osName: 'Linux', gpu: null }
+          }
+        ]
+      }
+    },
+    async activateWorktree() { return true }
+  }
+
+  const mod = {
+    default: (orca: Parameters<typeof main.default>[0]) =>
+      main.default(orca, mockCli, mockMetrics, undefined, undefined, undefined, mockHubHttp),
+    deactivate: main.deactivate
+  }
+  const worker = await mountWorker(mod, { host })
+  const snap = await worker.request('hq.getSnapshot')
+
+  // Local QA bot on laptop must NOT heuristically connect to hub-mac's downstream qa-linux
+  const studioQa = snap.bots.find((b) => b.name === 'Studio QA')
+  assert.equal(studioQa?.botHost, 'local')
+  assert.equal(studioQa?.primaryHost, 'local')
+  assert.equal(studioQa?.secondaryHost, null)
+
+  // Hub-hosted QA bot DOES connect to hub-mac's downstream qa-linux
+  const alphaQa = snap.bots.find((b) => b.name === 'Alpha QA')
+  assert.equal(alphaQa?.botHost, 'hub-mac')
+  assert.equal(alphaQa?.primaryHost, 'qa-linux')
+
+  // Worker on hub-mac under /Users/alex/... must NOT be misattributed to Alex Local Bot on laptop
+  const hubFeWorker = snap.workers.find((w) => w.id === 'ctx_hub_fe')
+  assert.equal(hubFeWorker?.bot, 'Alpha Delivery')
+  const alexBot = snap.bots.find((b) => b.name === 'Alex Local Bot')
+  assert.equal(alexBot?.botHost, 'local')
+  assert.equal(alexBot?.primaryHost, 'local')
+
+  await worker.deactivate()
+})
