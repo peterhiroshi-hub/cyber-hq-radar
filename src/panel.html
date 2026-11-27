@@ -1699,10 +1699,11 @@
         }
       }
       for (const wk of snap.workers || []) {
+        if (!wk.bot) continue;
         const dst = workerPorts.get(wk.id) || hostPorts.get(wk.host);
         if (!dst) continue;
-        const botName = wk.bot || (snap.bots.find((b) => b.squad === wk.squad)?.name) || (snap.bots[0]?.name || '');
-        const src = botPorts.get(botName) || botPorts.values().next().value;
+        const botName = wk.bot;
+        const src = botPorts.get(botName);
         if (!src) continue;
         const isWorking = wk.state === 'working';
         const dx = Math.max(36, Math.abs(dst.x - src.x) * 0.52);
@@ -2256,11 +2257,11 @@
         }
       }
       for (const w of data.workers || []) {
+        if (!w.bot) continue;
         const wb = workerBoxes.get(w.id);
         const hb = hostBoxes.get(w.host);
         const dst = wb ? wb.portIn : hb?.portIn;
-        const botName = w.bot || (data.bots.find((b) => b.squad === w.squad)?.name) || (data.bots[0]?.name || '');
-        const sb = botBoxes.get(botName);
+        const sb = botBoxes.get(w.bot);
         if (!sb || !dst) continue;
         cinemaConduits.push({
           src: sb.portOut, dst,

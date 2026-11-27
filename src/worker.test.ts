@@ -94,6 +94,16 @@ test('collects multi-host bots, workers, and performance metrics, jumps sessions
         ]
       }
     }
+    if (args[0] === 'bot' && args[1] === 'work' && args[2] === 'list') {
+      const botName = args[4]
+      if (botName === 'Alpha Delivery') {
+        return { items: [{ dispatchId: 'ctx_1', server: 'gpu-box', title: 'GPU feature build', startedAt: Date.now() }] }
+      }
+      if (botName === 'Alpha QA') {
+        return { items: [{ dispatchId: 'ctx_2', server: 'qa-box', title: 'QA audit pass', startedAt: Date.now() }] }
+      }
+      return { items: [] }
+    }
     if (args[0] === 'worktree' && args[1] === 'activate') {
       return { activated: true }
     }
@@ -435,6 +445,16 @@ test('discovers downstream servers via hub SSH relay, attributes multi-host bot 
         ]
       }
     }
+    if (args[0] === 'bot' && args[1] === 'work' && args[2] === 'list') {
+      const botName = args[4]
+      if (botName === 'Alpha Delivery') {
+        return { items: [{ dispatchId: 'ctx_1', server: 'gpu-box', title: 'GPU feature build', startedAt: Date.now() }] }
+      }
+      if (botName === 'Alpha QA') {
+        return { items: [{ dispatchId: 'ctx_2', server: 'qa-box', title: 'QA audit pass', startedAt: Date.now() }] }
+      }
+      return { items: [] }
+    }
     if (args[0] === 'worktree' && args[1] === 'activate') {
       return { activated: true }
     }
@@ -485,7 +505,8 @@ test('discovers downstream servers via hub SSH relay, attributes multi-host bot 
   assert.equal(delBot?.botHost, 'hub-mac')
   assert.equal(delBot?.primaryHost, 'gpu-box')
   assert.equal(qaBot?.botHost, 'hub-mac')
-  assert.equal(qaBot?.primaryHost, 'qa-box')
+  // Alpha QA has zero real dispatches or workers on qa-box -> must stay on its own host (no name guessing)
+  assert.equal(qaBot?.primaryHost, 'hub-mac')
 
   // Relayed worker resolved to Alpha Delivery via crossStoreParent on hub-mac
   const relayedWorker = snap.workers.find((w) => w.id === 'ctx_relayed_1')
@@ -719,7 +740,7 @@ test('auto-discovers Tailscale hub relay with zero config and accurately attribu
   await worker.deactivate()
 })
 
-test('isolates QA/Delivery routing per host domain and prevents OS username path collisions across hosts', async () => {
+test('routes strictly by real dispatch traffic with zero name guessing (no fake QA/GPU lines, no unowned worker guessing)', async () => {
   const host = mockHost({
     results: {
       'settings.get': { settings: {} },
@@ -757,7 +778,7 @@ test('isolates QA/Delivery routing per host domain and prevents OS username path
       return {
         workers: [
           {
-            dispatchId: 'ctx_hub_fe',
+            dispatchId: 'ctx_unowned',
             state: 'succeeded',
             liveness: 'exited',
             agent: 'antigravity',
@@ -766,7 +787,7 @@ test('isolates QA/Delivery routing per host domain and prevents OS username path
         ]
       }
     }
-    return { workers: [], worktrees: [] }
+    return { workers: [], worktrees: [], items: [] }
   }
 
   const mockMetrics: MetricsRunner = async (hostId) => {
@@ -785,14 +806,26 @@ test('isolates QA/Delivery routing per host domain and prevents OS username path
             { id: 'b-adel', name: 'Alpha Delivery', agent: 'antigravity' },
             { id: 'b-aqa', name: 'Alpha QA', agent: 'antigravity' }
           ],
-          worktrees: []
+          worktrees: [],
+          dispatches: [
+            {
+              bot: 'Alpha QA',
+              dispatchId: 'ctx_real_qa',
+              server: 'qa-linux',
+              title: 'Real adversarial QA audit',
+              state: 'completed',
+              startedAt: Date.now()
+            }
+          ]
         },
         children: [
           {
             env: { id: 'c-qa', name: 'qa-linux', endpoints: [{ endpoint: 'ws://100.80.2.5:6768' }] },
             envName: 'qa-linux',
             ok: true,
-            workers: [],
+            workers: [
+              { dispatchId: 'ctx_real_qa', state: 'succeeded', liveness: 'exited', agent: 'antigravity', workspace: 'r2::/home/qa/orca/workspaces/repo/pr-99' }
+            ],
             remotePs: [],
             metrics: { cpuPct: 12, ramPct: 30, ramUsedGb: 4.5, ramTotalGb: 15, diskPct: 20, diskFreeGb: 60, load1: 0.8, cores: 16, osName: 'Linux', gpu: null }
           }
@@ -810,20 +843,29 @@ test('isolates QA/Delivery routing per host domain and prevents OS username path
   const worker = await mountWorker(mod, { host })
   const snap = await worker.request('hq.getSnapshot')
 
-  // Local QA bot on laptop must NOT heuristically connect to hub-mac's downstream qa-linux
+  // Idle Studio QA on laptop has zero real traffic -> stays strictly on local
   const studioQa = snap.bots.find((b) => b.name === 'Studio QA')
   assert.equal(studioQa?.botHost, 'local')
   assert.equal(studioQa?.primaryHost, 'local')
   assert.equal(studioQa?.secondaryHost, null)
 
-  // Hub-hosted QA bot DOES connect to hub-mac's downstream qa-linux
+  // Idle Alpha Delivery on hub-mac has zero real traffic -> stays strictly on hub-mac
+  const alphaDel = snap.bots.find((b) => b.name === 'Alpha Delivery')
+  assert.equal(alphaDel?.botHost, 'hub-mac')
+  assert.equal(alphaDel?.primaryHost, 'hub-mac')
+  assert.equal(alphaDel?.secondaryHost, null)
+
+  // Alpha QA has REAL dispatch ctx_real_qa on qa-linux -> routes to qa-linux with real task title
   const alphaQa = snap.bots.find((b) => b.name === 'Alpha QA')
   assert.equal(alphaQa?.botHost, 'hub-mac')
   assert.equal(alphaQa?.primaryHost, 'qa-linux')
+  const realQaWorker = snap.workers.find((w) => w.id === 'ctx_real_qa')
+  assert.equal(realQaWorker?.bot, 'Alpha QA')
+  assert.equal(realQaWorker?.sessionTitle, 'Real adversarial QA audit')
 
-  // Worker on hub-mac under /Users/alex/... must NOT be misattributed to Alex Local Bot on laptop
-  const hubFeWorker = snap.workers.find((w) => w.id === 'ctx_hub_fe')
-  assert.equal(hubFeWorker?.bot, 'Alpha Delivery')
+  // Worker with NO dispatchId/crossStoreParent/row.bot stays bot=null (never guessed from path/name!)
+  const unownedWorker = snap.workers.find((w) => w.id === 'ctx_unowned')
+  assert.equal(unownedWorker?.bot, null)
   const alexBot = snap.bots.find((b) => b.name === 'Alex Local Bot')
   assert.equal(alexBot?.botHost, 'local')
   assert.equal(alexBot?.primaryHost, 'local')

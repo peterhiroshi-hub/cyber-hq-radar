@@ -121,10 +121,14 @@ async function isSameTailscaleUser(remoteIp) {
 
 async function runOrcaJson(cliArgs, timeoutMs = 15000) {
   try {
+    const cleanEnv = { ...process.env }
+    delete cleanEnv.ORCA_BOT_TOOLS_TOKEN
+    delete cleanEnv.ORCA_AGENT_SESSION_ID
+    delete cleanEnv.ORCA_AGENT_SESSION_SPAWN_TOKEN
     const { stdout } = await execFileAsync(defaultOrcaBin(), cliArgs, {
       timeout: timeoutMs,
       maxBuffer: 4 * 1024 * 1024,
-      env: { ...process.env }
+      env: cleanEnv
     })
     const trimmed = stdout.trim()
     if (!trimmed) return null
@@ -335,6 +339,22 @@ let cachedSnapshot = null
 let cachedAt = 0
 let inflight = null
 let lastKnownEnvs = []
+let lastKnownBots = []
+let lastKnownWorktrees = []
+let lastKnownDispatches = []
+
+async function mapConcurrent(items, limit, fn) {
+  const results = new Array(items.length)
+  let nextIdx = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIdx < items.length) {
+      const cur = nextIdx++
+      results[cur] = await fn(items[cur], cur)
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
 
 function refreshRelaySnapshot(depth = 0, visited = new Set()) {
   if (depth === 0 && inflight) return inflight
@@ -346,14 +366,40 @@ function refreshRelaySnapshot(depth = 0, visited = new Set()) {
     const [hubMetrics, envsRes, botsRes, localPsRes] = await Promise.all([
       collectLocalMetrics(),
       runOrcaJson(['environment', 'list', '--json'], 15000),
-      runOrcaJson(['bot', 'list', '--json'], 8000),
-      runOrcaJson(['worktree', 'ps', '--since', '24h', '--json'], 10000)
+      runOrcaJson(['bot', 'list', '--json'], 15000),
+      runOrcaJson(['worktree', 'ps', '--since', '7d', '--json'], 15000)
     ])
     const fetchedEnvs = Array.isArray(envsRes?.environments) ? envsRes.environments : []
     if (fetchedEnvs.length > 0) lastKnownEnvs = fetchedEnvs
     const rawEnvs = fetchedEnvs.length > 0 ? fetchedEnvs : lastKnownEnvs
-    const hubBots = Array.isArray(botsRes?.bots) ? botsRes.bots : []
-    const hubWorktrees = Array.isArray(localPsRes?.worktrees) ? localPsRes.worktrees : []
+
+    const fetchedBots = Array.isArray(botsRes?.bots) ? botsRes.bots : []
+    if (fetchedBots.length > 0) lastKnownBots = fetchedBots
+    const hubBots = fetchedBots.length > 0 ? fetchedBots : lastKnownBots
+
+    const fetchedWorktrees = Array.isArray(localPsRes?.worktrees) ? localPsRes.worktrees : []
+    if (fetchedWorktrees.length > 0) lastKnownWorktrees = fetchedWorktrees
+    const hubWorktrees = fetchedWorktrees.length > 0 ? fetchedWorktrees : lastKnownWorktrees
+
+    // Collect authoritative per-Bot dispatch records (real dispatchId -> Bot + server + title) with bounded concurrency
+    const fetchedDispatches = []
+    const workLists = await mapConcurrent(hubBots, 3, async (b) => {
+      if (!b?.name) return []
+      const wl = await runOrcaJson(['bot', 'work', 'list', '--bot', b.name, '--json'], 10000)
+      const items = Array.isArray(wl?.items) ? wl.items : []
+      return items.slice(0, 20).map((it) => ({
+        bot: b.name,
+        dispatchId: it.dispatchId || null,
+        workspace: it.workspace || null,
+        server: it.server || null,
+        title: it.title || null,
+        state: it.state || null,
+        startedAt: typeof it.startedAt === 'number' ? it.startedAt : null
+      }))
+    })
+    for (const rows of workLists) fetchedDispatches.push(...rows)
+    if (fetchedDispatches.length > 0) lastKnownDispatches = fetchedDispatches
+    const hubDispatches = fetchedDispatches.length > 0 ? fetchedDispatches : lastKnownDispatches
 
     const directChildren = await Promise.all(
       rawEnvs.map(async (env) => {
@@ -427,7 +473,8 @@ function refreshRelaySnapshot(depth = 0, visited = new Set()) {
         hostname: os.hostname().replace(/\.local$/i, ''),
         metrics: hubMetrics,
         bots: hubBots,
-        worktrees: hubWorktrees
+        worktrees: hubWorktrees,
+        dispatches: hubDispatches
       },
       children
     }

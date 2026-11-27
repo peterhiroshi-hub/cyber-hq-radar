@@ -49,6 +49,16 @@ export type HubRelayTarget = {
   token: string
 }
 
+export type RawBotDispatch = {
+  bot: string
+  dispatchId?: string | null
+  workspace?: string | null
+  server?: string | null
+  title?: string | null
+  state?: string | null
+  startedAt?: number | null
+}
+
 export type HubRelayChildPayload = {
   env?: RawEnv
   envName?: string
@@ -57,6 +67,7 @@ export type HubRelayChildPayload = {
   workers?: RawRemoteWorker[]
   remotePs?: RawWorktreePs[]
   bots?: RawBot[]
+  dispatches?: RawBotDispatch[]
   metrics?: HostMetrics | null
 }
 
@@ -67,6 +78,7 @@ export type HubRelaySnapshotPayload = {
     metrics?: HostMetrics | null
     bots?: RawBot[]
     worktrees?: RawWorktreePs[]
+    dispatches?: RawBotDispatch[]
   }
   children?: HubRelayChildPayload[]
 }
@@ -221,10 +233,14 @@ export function defaultOrcaBin(): string {
 
 export async function runOrcaCliJson(args: string[]): Promise<unknown | null> {
   try {
+    const cleanEnv: Record<string, string | undefined> = { ...process.env }
+    delete cleanEnv.ORCA_BOT_TOOLS_TOKEN
+    delete cleanEnv.ORCA_AGENT_SESSION_ID
+    delete cleanEnv.ORCA_AGENT_SESSION_SPAWN_TOKEN
     const { stdout } = await execFileAsync(defaultOrcaBin(), args, {
       timeout: 4500,
       maxBuffer: 4 * 1024 * 1024,
-      env: { ...process.env }
+      env: cleanEnv
     })
     const trimmed = stdout.trim()
     if (!trimmed) return null
@@ -748,7 +764,7 @@ export async function collectHqSnapshot(
   const includeLocal = cfg.showLocalHost || controlHostId === 'local'
   const [localPsRes, localWorkersRes, localMetrics] = includeLocal
     ? await Promise.all([
-        cli(['worktree', 'ps', '--since', '24h', '--json']),
+        cli(['worktree', 'ps', '--since', '7d', '--json']),
         cli(['orchestration', 'worker-list', '--json']),
         metricsRunner('local', null, null).catch(() => null)
       ])
@@ -766,6 +782,7 @@ export async function collectHqSnapshot(
     workers: RawRemoteWorker[]
     remotePs: RawWorktreePs[]
     hostedBots: RawBot[]
+    dispatches: RawBotDispatch[]
     metrics: HostMetrics | null
   }
 
@@ -780,7 +797,7 @@ export async function collectHqSnapshot(
         explicitRelay || (isTailscaleIp(endpointHost) ? { baseUrl: `http://${endpointHost}:19768`, token: '' } : null)
       const [res, remotePsRes, envBotsRes, httpRelaySnap] = await Promise.all([
         cli(['orchestration', 'worker-list', '--environment', envName, '--json']),
-        cli(['worktree', 'ps', '--environment', envName, '--since', '24h', '--json']),
+        cli(['worktree', 'ps', '--environment', envName, '--since', '7d', '--json']),
         cli(['bot', 'list', '--environment', envName, '--json']),
         probeRelay ? hubRelayClient.fetchSnapshot(probeRelay).catch(() => null) : Promise.resolve(null)
       ])
@@ -800,6 +817,7 @@ export async function collectHqSnapshot(
         ? ((envBotsRes as { bots: RawBot[] }).bots)
         : []
       const hostedBots = relayBots.length > 0 ? relayBots : cliBots
+      const dispatches = Array.isArray(httpRelaySnap?.host?.dispatches) ? httpRelaySnap.host.dispatches : []
       return {
         env,
         envName,
@@ -812,6 +830,7 @@ export async function collectHqSnapshot(
         workers,
         remotePs,
         hostedBots,
+        dispatches,
         metrics
       }
     })
@@ -844,6 +863,7 @@ export async function collectHqSnapshot(
         workers: Array.isArray(ch.workers) ? ch.workers : [],
         remotePs: Array.isArray(ch.remotePs) ? ch.remotePs : [],
         hostedBots: Array.isArray(ch.bots) ? ch.bots : [],
+        dispatches: Array.isArray(ch.dispatches) ? ch.dispatches : [],
         metrics: ch.metrics ?? null
       })
     }
@@ -902,6 +922,7 @@ export async function collectHqSnapshot(
             workers,
             remotePs,
             hostedBots: [],
+            dispatches: [],
             metrics
           }
         })()
@@ -1043,57 +1064,61 @@ export async function collectHqSnapshot(
     return null
   }
 
-  // Track each host's immediate parent hub ('local' for direct paired hosts, hub.envName for relayed downstream hosts)
-  const parentHubByHost = new Map<string, HostId>()
-  for (const r of directRemoteResults) {
-    parentHubByHost.set(r.envName, 'local')
+  // Collect authoritative real dispatch records (dispatchId -> Bot + server + title) from local Bots + remote hubs
+  const dispatchById = new Map<string, RawBotDispatch>()
+  const dispatchByWorkspace = new Map<string, RawBotDispatch>()
+  const botTrafficServers = new Map<string, { server: string; startedAt: number }[]>()
+
+  const ingestDispatch = (d: RawBotDispatch) => {
+    if (!d?.bot) return
+    if (d.dispatchId && !dispatchById.has(d.dispatchId)) {
+      dispatchById.set(d.dispatchId, d)
+    }
+    if (d.workspace && !dispatchByWorkspace.has(d.workspace)) {
+      dispatchByWorkspace.set(d.workspace, d)
+    }
+    if (d.server) {
+      const resolvedSrv = resolveHostId(d.server)
+      const list = botTrafficServers.get(d.bot) || []
+      list.push({ server: resolvedSrv, startedAt: d.startedAt ?? 0 })
+      botTrafficServers.set(d.bot, list)
+    }
   }
-  for (const r of relayedResults) {
-    if (r.viaHub) {
-      const rootHub = r.viaHub.split('→')[0]?.trim() || r.viaHub
-      parentHubByHost.set(r.envName, rootHub)
+
+  for (const r of remoteResults) {
+    for (const d of r.dispatches) ingestDispatch(d)
+  }
+
+  // Also query local Bot work lists for Bots hosted locally (never guessing from names)
+  const localOwnedBots = rawBots.filter((b) => {
+    if (!b.name) return false
+    const owner = botHostByName.get(b.name) || controlHostId
+    return owner === 'local'
+  })
+  if (includeLocal && localOwnedBots.length > 0) {
+    const localWorkLists = await Promise.all(
+      localOwnedBots.map(async (b) => {
+        const res = await cli(['bot', 'work', 'list', '--bot', b.name!, '--json']).catch(() => null)
+        const items = Array.isArray((res as { items?: unknown })?.items)
+          ? ((res as { items: Array<{ dispatchId?: string | null; workspace?: string | null; server?: string | null; title?: string | null; state?: string | null; startedAt?: number | null }> }).items)
+          : []
+        return items.slice(0, 20).map((it): RawBotDispatch => ({
+          bot: b.name!,
+          dispatchId: it.dispatchId || null,
+          workspace: it.workspace || null,
+          server: it.server || null,
+          title: it.title || null,
+          state: it.state || null,
+          startedAt: typeof it.startedAt === 'number' ? it.startedAt : null
+        }))
+      })
+    )
+    for (const rows of localWorkLists) {
+      for (const d of rows) ingestDispatch(d)
     }
   }
 
   const knownSquads = new Set<string>(rawBots.map((b) => classifySquad(b.name)))
-
-  // Helper to match a worker with a Bot when crossStoreParent was not set, scoped to Bots that can reach hostId
-  const inferBotFromKnownBots = (
-    squad: BotSquad,
-    hint: string,
-    explicitBot: string | null,
-    workerHostId?: HostId
-  ): string | null => {
-    if (explicitBot) return explicitBot
-    const h = hint.toLowerCase()
-    const isQa = h.includes('qa') || h.includes('review') || h.includes('audit')
-    const allowedOwnerHosts = new Set<HostId>()
-    if (workerHostId) {
-      allowedOwnerHosts.add(workerHostId)
-      const parentHub = parentHubByHost.get(workerHostId)
-      if (parentHub) allowedOwnerHosts.add(parentHub)
-      else if (workerHostId !== 'local') allowedOwnerHosts.add(controlHostId)
-    }
-    const hostEligible = (b: RawBot) => {
-      if (allowedOwnerHosts.size === 0) return true
-      const owner = botHostByName.get(b.name || '') || controlHostId
-      return allowedOwnerHosts.has(owner)
-    }
-    const sameSquad = rawBots.filter((b) => classifySquad(b.name) === squad && hostEligible(b))
-    if (sameSquad.length > 0) {
-      const preferred = sameSquad.find((b) => {
-        const r = classifyRole(b.name)
-        return isQa ? r === 'qa' : r === 'delivery'
-      })
-      if (preferred?.name) return preferred.name
-      if (sameSquad[0]?.name) return sameSquad[0].name
-    }
-    if (squad === 'command') {
-      const cmd = rawBots.find((b) => classifyRole(b.name) === 'copilot' && hostEligible(b))
-      if (cmd?.name) return cmd.name
-    }
-    return null
-  }
 
   const workers: WorkerNodeInfo[] = []
   const seenWorkspaces = new Set<string>()
@@ -1108,10 +1133,11 @@ export async function collectHqSnapshot(
       const state = mapWorkerState(row.status, undefined, bestAgent?.state)
       const host = resolveHostId(row.hostId)
       const parentWsKey = row.crossStoreParent?.parent?.workspaceKey || null
-      const parentBotName = (parentWsKey && botNameByWorkspaceId.get(parentWsKey)) || row.bot || null
+      const dispatchRec = (row.worktreeId && dispatchByWorkspace.get(row.worktreeId)) || null
+      // Strictly real Orca provenance: crossStoreParent, explicit row.bot, or real bot work dispatch
+      const bot = (parentWsKey && botNameByWorkspaceId.get(parentWsKey)) || row.bot || dispatchRec?.bot || null
       const cleanLocalPath = stripOsHomePrefix(row.path)
-      const squad = classifySquad(parentBotName || `${row.displayName || ''} ${row.repo || ''} ${row.branch || ''} ${cleanLocalPath}`, knownSquads)
-      const bot = inferBotFromKnownBots(squad, `${row.displayName || ''} ${row.branch || ''}`, parentBotName, host)
+      const squad = classifySquad(bot || `${row.displayName || ''} ${row.repo || ''} ${row.branch || ''} ${cleanLocalPath}`, knownSquads)
       workers.push({
         id: wtId || `${row.repo}:${row.displayName}`,
         title: row.displayName || row.branch || row.repo || 'workspace',
@@ -1126,9 +1152,9 @@ export async function collectHqSnapshot(
         workspacePath: row.path || '',
         sessionId: bestAgent?.orcaSessionId || null,
         terminalId: null,
-        sessionTitle: pickAgentSummary(bestAgent),
+        sessionTitle: pickAgentSummary(bestAgent) || dispatchRec?.title || null,
         activeToolName: bestAgent?.state === 'working' ? (bestAgent.toolName || null) : null,
-        lastActivityAt: row.lastActivityAt ?? null
+        lastActivityAt: row.lastActivityAt ?? dispatchRec?.startedAt ?? null
       })
     }
   }
@@ -1153,10 +1179,15 @@ export async function collectHqSnapshot(
       if (mapped !== 'working' && workers.filter((x) => x.host === envName).length >= 5) continue
 
       const parentWsKey = matchedPs?.crossStoreParent?.parent?.workspaceKey || null
-      const parentBotName = (parentWsKey ? botNameByWorkspaceId.get(parentWsKey) : null) || matchedPs?.bot || null
+      const dispatchRec = (w.dispatchId && dispatchById.get(w.dispatchId)) || (ws && dispatchByWorkspace.get(ws)) || null
+      // Strictly real Orca provenance: real dispatchId, crossStoreParent, or explicit matchedPs.bot (zero name guessing)
+      const bot =
+        dispatchRec?.bot ||
+        (parentWsKey ? botNameByWorkspaceId.get(parentWsKey) : null) ||
+        matchedPs?.bot ||
+        null
       const cleanRemotePath = stripOsHomePrefix(wsPath)
-      const squad = classifySquad(parentBotName || `${shortName} ${matchedPs?.repo || ''} ${cleanRemotePath}`, knownSquads)
-      const bot = inferBotFromKnownBots(squad, `${envName} ${shortName} ${cleanRemotePath}`, parentBotName, envName)
+      const squad = classifySquad(bot || `${shortName} ${matchedPs?.repo || ''} ${cleanRemotePath}`, knownSquads)
 
       workers.push({
         id: w.dispatchId || ws || shortName,
@@ -1172,9 +1203,9 @@ export async function collectHqSnapshot(
         workspacePath: wsPath,
         sessionId: bestAgent?.orcaSessionId || null,
         terminalId: w.terminal || null,
-        sessionTitle: pickAgentSummary(bestAgent),
+        sessionTitle: pickAgentSummary(bestAgent) || dispatchRec?.title || null,
         activeToolName: bestAgent?.state === 'working' ? (bestAgent.toolName || null) : null,
-        lastActivityAt: matchedPs?.lastActivityAt ?? null
+        lastActivityAt: matchedPs?.lastActivityAt ?? dispatchRec?.startedAt ?? null
       })
     }
 
@@ -1190,10 +1221,14 @@ export async function collectHqSnapshot(
       const mapped = mapWorkerState(rps.status, undefined, bestAgent?.state)
       if (mapped !== 'working' && workers.filter((x) => x.host === envName).length >= 5) continue
       const parentWsKey = rps.crossStoreParent?.parent?.workspaceKey || null
-      const parentBotName = (parentWsKey ? botNameByWorkspaceId.get(parentWsKey) : null) || rps.bot || null
+      const dispatchRec = dispatchByWorkspace.get(ws) || null
+      const bot =
+        (parentWsKey ? botNameByWorkspaceId.get(parentWsKey) : null) ||
+        rps.bot ||
+        dispatchRec?.bot ||
+        null
       const cleanRpsPath = stripOsHomePrefix(rps.path)
-      const squad = classifySquad(parentBotName || `${rps.displayName || ''} ${rps.repo || ''} ${cleanRpsPath}`, knownSquads)
-      const bot = inferBotFromKnownBots(squad, `${envName} ${rps.displayName || ''} ${cleanRpsPath}`, parentBotName, envName)
+      const squad = classifySquad(bot || `${rps.displayName || ''} ${rps.repo || ''} ${cleanRpsPath}`, knownSquads)
       workers.push({
         id: ws,
         title: rps.displayName || rps.branch || rps.repo || 'workspace',
@@ -1208,9 +1243,9 @@ export async function collectHqSnapshot(
         workspacePath: rps.path || '',
         sessionId: bestAgent?.orcaSessionId || null,
         terminalId: null,
-        sessionTitle: pickAgentSummary(bestAgent),
+        sessionTitle: pickAgentSummary(bestAgent) || dispatchRec?.title || null,
         activeToolName: bestAgent?.state === 'working' ? (bestAgent.toolName || null) : null,
-        lastActivityAt: rps.lastActivityAt ?? null
+        lastActivityAt: rps.lastActivityAt ?? dispatchRec?.startedAt ?? null
       })
     }
   }
@@ -1220,12 +1255,13 @@ export async function collectHqSnapshot(
       if (ws.kind !== 'worktree' || seenWorkspaces.has(ws.id)) continue
       const mapped = mapWorkerState(ws.status?.state)
       const host = ws.hostId || 'local'
-      const squad = classifySquad(ws.project || ws.name || ws.path)
+      const dispatchRec = dispatchByWorkspace.get(ws.id) || null
+      const squad = classifySquad(dispatchRec?.bot || ws.project || ws.name || ws.path, knownSquads)
       workers.push({
         id: ws.id,
         title: ws.name || ws.branch || 'worktree',
         host,
-        bot: inferBotFromKnownBots(squad, `${ws.name} ${ws.branch || ''}`, null),
+        bot: dispatchRec?.bot || null,
         parentBotWorkspaceId: null,
         squad,
         agent: 'antigravity',
@@ -1235,7 +1271,7 @@ export async function collectHqSnapshot(
         workspacePath: ws.path,
         sessionId: null,
         terminalId: null,
-        sessionTitle: null,
+        sessionTitle: dispatchRec?.title || null,
         activeToolName: null,
         lastActivityAt: ws.status?.lastActivityAt ?? null
       })
@@ -1286,16 +1322,8 @@ export async function collectHqSnapshot(
     })
   }
 
-  // Scope heuristic GPU/QA routing strictly to non-control compute nodes attached to each Bot's own host
-  const computeChildrenForHost = (ownerHostId: HostId) =>
-    hosts.filter((h) => {
-      if (h.isControlPlane || h.id === ownerHostId) return false
-      const parentHub = parentHubByHost.get(h.id)
-      if (parentHub === ownerHostId) return true
-      // Remote console mode (showLocalHost=false, single control host with direct sibling workers)
-      if (!includeLocal && ownerHostId === controlHostId && parentHub === 'local') return true
-      return false
-    })
+  const validHostIds = new Set(hosts.map((h) => h.id))
+  const recentCutoffMs = Date.now() - 24 * 60 * 60 * 1000
 
   const bots: BotNodeInfo[] = rawBots.map((b) => {
     const name = b.name || 'Bot'
@@ -1306,20 +1334,27 @@ export async function collectHqSnapshot(
     const botWorkers = workers.filter((w) => w.bot === name)
     const activeDispatchCount = botWorkers.filter((w) => w.state === 'working').length
 
-    // Dynamic host routing based on actual observed workers, then host-scoped compute children heuristics
-    const observedHosts = [...new Set(botWorkers.map((w) => w.host))]
-    let primaryHost: HostId = observedHosts[0] || actualBotHost
-    let secondaryHost: HostId | null = observedHosts[1] || null
-    if (observedHosts.length === 0) {
-      const children = computeChildrenForHost(actualBotHost)
-      const scopedGpuHost = children.find((h) => h.metrics?.gpu)?.id || null
-      const scopedQaHost = children.find((h) => h.id !== scopedGpuHost)?.id || null
-      if (role === 'delivery' && scopedGpuHost) primaryHost = scopedGpuHost
-      else if (role === 'qa' && scopedQaHost) {
-        primaryHost = scopedQaHost
-        secondaryHost = actualBotHost
-      }
+    // 100% traffic-driven routing: ONLY real observed workers and real recent bot dispatches (zero name heuristics)
+    const trafficHosts: HostId[] = []
+    const addTrafficHost = (hid: HostId) => {
+      if (!hid || !validHostIds.has(hid) || trafficHosts.includes(hid)) return
+      trafficHosts.push(hid)
     }
+    const sortedBotWorkers = [...botWorkers].sort((a, b) => {
+      const aLive = a.state === 'working' ? 1 : 0
+      const bLive = b.state === 'working' ? 1 : 0
+      if (bLive !== aLive) return bLive - aLive
+      return (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0)
+    })
+    for (const w of sortedBotWorkers) addTrafficHost(w.host)
+    const recentDispatches = [...(botTrafficServers.get(name) || [])]
+      .filter((x) => !x.startedAt || x.startedAt >= recentCutoffMs)
+      .sort((a, b) => b.startedAt - a.startedAt)
+    for (const rd of recentDispatches) addTrafficHost(rd.server)
+
+    const primaryHost: HostId = trafficHosts[0] || actualBotHost
+    const secondaryHost: HostId | null =
+      trafficHosts[1] || (primaryHost !== actualBotHost && validHostIds.has(actualBotHost) ? actualBotHost : null)
 
     let state: BotNodeInfo['state'] = 'idle'
     if (b.paused) state = 'paused'
