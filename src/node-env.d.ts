@@ -98,4 +98,6 @@ declare const __dirname: string | undefined
 
 declare const Buffer: {
   from(input: string, encoding: 'base64' | 'utf8' | 'hex'): Uint8Array & { length: number; toString(encoding?: string): string }
+  alloc(size: number, fill?: number): Uint8Array & { length: number; toString(encoding?: string): string }
+  byteLength(input: string, encoding?: 'utf8'): number
 }

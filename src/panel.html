@@ -2080,36 +2080,76 @@
   async function saveVideoChunked(base64Raw, outMime, fname) {
     const clean = String(base64Raw || '').replace(/^data:[^,]*;base64,/i, '');
     if (!clean) throw new Error('Empty encoded video payload');
-    const CHUNK_SIZE = 64 * 1024;
-    if (clean.length <= CHUNK_SIZE) {
-      return apiRequest('hq.saveVideo', {
-        base64: clean,
-        mimeType: outMime,
-        filename: fname,
-        reveal: true
-      });
-    }
-    const uploadId = 'vid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-    const totalChunks = Math.ceil(clean.length / CHUNK_SIZE);
-    let lastRes = null;
-    for (let i = 0; i < totalChunks; i++) {
-      const pct = Math.min(99, Math.round(((i + 1) / totalChunks) * 100));
-      recBtn.textContent = 'SAVING ' + pct + '%';
-      const slice = clean.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-      lastRes = await apiRequest('hq.saveVideo', {
-        uploadId,
-        chunkIndex: i,
-        totalChunks,
-        base64: slice,
-        mimeType: outMime,
-        filename: fname,
-        reveal: true
-      });
-      if (!lastRes || (i < totalChunks - 1 && !lastRes.chunkAccepted && !lastRes.saved)) {
-        throw new Error(lastRes?.error || 'Chunk upload rejected');
+    const viaOrcaIpc = Boolean(orca && orca.plugin);
+    // Orca panel IPC enforces a strict 64 KiB JSON frame limit (payload + RPC envelope).
+    // Use 32 KiB base64 chunks (~33 KiB total JSON frame) with adaptive halving down to 8 KiB.
+    let chunkSize = viaOrcaIpc ? (32 * 1024) : (256 * 1024);
+    const minChunkSize = 8 * 1024;
+
+    while (true) {
+      if (clean.length <= chunkSize) {
+        try {
+          return await apiRequest('hq.saveVideo', {
+            base64: clean,
+            mimeType: outMime,
+            filename: fname,
+            reveal: true
+          });
+        } catch (err) {
+          const msg = err && err.message ? err.message : String(err || '');
+          if (viaOrcaIpc && chunkSize > minChunkSize && /size limit|too large|payload/i.test(msg)) {
+            chunkSize = Math.max(minChunkSize, Math.floor(chunkSize / 2));
+            continue;
+          }
+          throw err;
+        }
       }
+
+      const uploadId = 'vid_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+      const totalChunks = Math.ceil(clean.length / chunkSize);
+      let lastRes = null;
+      let retrySmaller = false;
+
+      for (let i = 0; i < totalChunks; i++) {
+        const pct = Math.min(99, Math.round(((i + 1) / totalChunks) * 100));
+        recBtn.textContent = 'SAVING ' + pct + '%';
+        const slice = clean.slice(i * chunkSize, (i + 1) * chunkSize);
+        const isLast = i === totalChunks - 1;
+        const payload = isLast
+          ? {
+              uploadId,
+              chunkIndex: i,
+              totalChunks,
+              base64: slice,
+              mimeType: outMime,
+              filename: fname,
+              reveal: true
+            }
+          : {
+              uploadId,
+              chunkIndex: i,
+              totalChunks,
+              base64: slice
+            };
+        try {
+          lastRes = await apiRequest('hq.saveVideo', payload);
+        } catch (err) {
+          const msg = err && err.message ? err.message : String(err || '');
+          if (viaOrcaIpc && i === 0 && chunkSize > minChunkSize && /size limit|too large|payload/i.test(msg)) {
+            chunkSize = Math.max(minChunkSize, Math.floor(chunkSize / 2));
+            retrySmaller = true;
+            break;
+          }
+          throw err;
+        }
+        if (!lastRes || (!isLast && !lastRes.chunkAccepted && !lastRes.saved)) {
+          throw new Error(lastRes?.error || 'Chunk upload rejected');
+        }
+      }
+
+      if (retrySmaller) continue;
+      return lastRes;
     }
-    return lastRes;
   }
 
   async function exportCinemaVideo() {

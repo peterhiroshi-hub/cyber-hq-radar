@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "cyber-hq-radar",
   "name": "Cyber HQ Radar",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "All-in-one cyberpunk fleet command dashboard for Orca: live Bots, multi-host workers, real-time CPU/RAM/Disk/GPU gauges, engine mix icons, fullscreen wallboard, and 1080p video export.",
   "author": {
     "name": "peterhiroshi-hub",

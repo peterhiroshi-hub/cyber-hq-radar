@@ -1641,7 +1641,7 @@ export default function activate(
       if (input?.uploadId && typeof input.totalChunks === 'number' && input.totalChunks > 1) {
         const total = Math.floor(input.totalChunks)
         const idx = Math.floor(input.chunkIndex ?? -1)
-        if (total > 2048 || idx < 0 || idx >= total) {
+        if (total > 4096 || idx < 0 || idx >= total) {
           return { saved: false, path: null, bytes: 0, format, error: 'Invalid video chunk metadata' }
         }
         let slot = pendingVideoUploads.get(input.uploadId)
@@ -1658,6 +1658,7 @@ export default function activate(
           slot.received += 1
           slot.totalLen += piece.length
         }
+        slot.createdAt = now
         if (slot.totalLen > 90 * 1024 * 1024) {
           pendingVideoUploads.delete(input.uploadId)
           return { saved: false, path: null, bytes: 0, format, error: 'Video upload exceeds size limit' }
@@ -1679,16 +1680,20 @@ export default function activate(
       if (out.saved && out.path) {
         const mb = (out.bytes / (1024 * 1024)).toFixed(2)
         pushLog('system', `EXPORTED VIDEO (${out.format.toUpperCase()} · ${mb}MB) :: ${path.basename(out.path)}`)
+      } else if (out.error) {
+        pushLog('system', `EXPORT VIDEO FAILED :: ${out.error}`)
       }
       return out
     } catch (err) {
       if (input?.uploadId) pendingVideoUploads.delete(input.uploadId)
+      const errMsg = err instanceof Error ? err.message : 'Save video failed'
+      pushLog('system', `EXPORT VIDEO FAILED :: ${errMsg}`)
       return {
         saved: false,
         path: null,
         bytes: 0,
         format,
-        error: err instanceof Error ? err.message : 'Save video failed'
+        error: errMsg
       }
     }
   }

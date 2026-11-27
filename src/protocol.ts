@@ -116,7 +116,7 @@ export type OpenSessionOutput = {
 
 export type SaveVideoInput = {
   base64: string
-  mimeType: string
+  mimeType?: string
   filename?: string
   reveal?: boolean
   uploadId?: string

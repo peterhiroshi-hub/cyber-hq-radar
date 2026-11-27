@@ -143,7 +143,7 @@ test('collects multi-host bots, workers, and performance metrics, jumps sessions
     saved: true,
     path: `/Users/dev/Downloads/${input.filename || 'cyber-hq.mp4'}`,
     bytes: 4096,
-    format: input.mimeType.includes('mp4') ? 'mp4' : 'webm'
+    format: (input.mimeType || '').includes('mp4') ? 'mp4' : 'webm'
   })
 
   let openedWallUrl = ''
@@ -869,6 +869,90 @@ test('routes strictly by real dispatch traffic with zero name guessing (no fake 
   const alexBot = snap.bots.find((b) => b.name === 'Alex Local Bot')
   assert.equal(alexBot?.botHost, 'local')
   assert.equal(alexBot?.primaryHost, 'local')
+
+  await worker.deactivate()
+})
+
+test('chunked hq.saveVideo stays strictly under Orca 64 KiB IPC frame limit across consecutive exports', async () => {
+  const fs = await import('node:fs/promises')
+  const { fileURLToPath } = await import('node:url')
+  const panelPath = fileURLToPath(new URL('./panel.html', import.meta.url).href)
+  const panelHtml = await fs.readFile(panelPath, 'utf8')
+  assert.match(panelHtml, /let chunkSize = viaOrcaIpc \? \(32 \* 1024\) : \(256 \* 1024\)/)
+
+  const host = mockHost({
+    results: {
+      'settings.get': { settings: {} },
+      'workspace.list': { workspaces: [], truncated: false }
+    }
+  })
+
+  const savedPayloads: { filename: string; mimeType: string; bytes: Uint8Array }[] = []
+  const mockVideoSaver = async (input: { base64: string; mimeType?: string; filename?: string }) => {
+    const buf = Buffer.from(input.base64, 'base64')
+    savedPayloads.push({
+      filename: input.filename || 'out.mp4',
+      mimeType: input.mimeType || 'video/mp4',
+      bytes: buf
+    })
+    return { saved: true, path: `/tmp/${input.filename || 'out.mp4'}`, bytes: buf.length, format: 'mp4' as const }
+  }
+
+  const noopCli: CliRunner = async () => ({ bots: [], environments: [], workers: [], worktrees: [], items: [] })
+  const noopMetrics: MetricsRunner = async () => null
+
+  const mod = {
+    default: (orca: Parameters<typeof main.default>[0]) =>
+      main.default(orca, noopCli, noopMetrics, mockVideoSaver, undefined, undefined, noopHubRelay),
+    deactivate: main.deactivate
+  }
+  const worker = await mountWorker(mod, { host })
+
+  const IPC_LIMIT_BYTES = 64 * 1024
+  const CHUNK_SIZE = 32 * 1024
+
+  // Perform 2 consecutive chunked uploads simulating Orca's strict 64 KiB JSON-RPC frame cap
+  for (let run = 1; run <= 2; run++) {
+    const rawBytes = Buffer.alloc(180 * 1024, run === 1 ? 0x41 : 0x42)
+    const b64 = rawBytes.toString('base64')
+    const totalChunks = Math.ceil(b64.length / CHUNK_SIZE)
+    const uploadId = `vid_ipc_test_${run}`
+    const fname = `cyber-hq-radar-test-${run}.mp4`
+    let finalRes: { saved?: boolean; bytes?: number; chunkAccepted?: boolean } | null = null
+
+    for (let i = 0; i < totalChunks; i++) {
+      const isLast = i === totalChunks - 1
+      const slice = b64.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE)
+      const params = isLast
+        ? { uploadId, chunkIndex: i, totalChunks, base64: slice, mimeType: 'video/mp4;codecs=avc1.640028', filename: fname, reveal: true }
+        : { uploadId, chunkIndex: i, totalChunks, base64: slice }
+      const envelope = JSON.stringify({
+        type: 'panel.request',
+        id: `req_20261127_${run}_${i}`,
+        pluginId: 'peterhiroshi-hub.cyber-hq-radar',
+        panelId: 'cyber-hq-radar',
+        method: 'hq.saveVideo',
+        params
+      })
+      assert.ok(
+        Buffer.byteLength(envelope, 'utf8') <= IPC_LIMIT_BYTES,
+        `IPC frame exceeded 64 KiB cap (${Buffer.byteLength(envelope, 'utf8')} bytes)`
+      )
+      finalRes = await worker.request('hq.saveVideo', params)
+      if (!isLast) {
+        assert.equal(finalRes?.chunkAccepted, true)
+      }
+    }
+
+    assert.equal(finalRes?.saved, true)
+    assert.equal(finalRes?.bytes, rawBytes.length)
+  }
+
+  assert.equal(savedPayloads.length, 2)
+  assert.equal(savedPayloads[0].bytes.length, 180 * 1024)
+  assert.equal(savedPayloads[1].bytes.length, 180 * 1024)
+  assert.equal(savedPayloads[0].bytes[0], 0x41)
+  assert.equal(savedPayloads[1].bytes[0], 0x42)
 
   await worker.deactivate()
 })
