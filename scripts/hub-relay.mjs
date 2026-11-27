@@ -1,14 +1,19 @@
 #!/usr/bin/env node
 /**
- * Cyber HQ Radar — Lightweight Zero-SSH Hub Telemetry Relay
+ * Cyber HQ Radar — Zero-Config Recursive Hub Telemetry Relay
  *
- * Run on a paired hub machine (macOS or Linux) without sudo or an SSH daemon.
- * - Zero idle polling: collects metrics and downstream Orca nodes only on authenticated requests (with 4s cache).
- * - Binds strictly to the interface you pass via --host (e.g. your Tailscale IP, defaults to 127.0.0.1).
- * - Requires Authorization: Bearer <token> (timing-safe comparison).
+ * Run on any paired hub machine (macOS or Linux) without sudo or an SSH daemon:
+ *   node scripts/hub-relay.mjs --host <tailscale-ip>
  *
- * Usage:
- *   node scripts/hub-relay.mjs --host 100.x.y.z --port 19768 --token <secret>
+ * Features:
+ * - Zero-config Tailscale WhoIs auth: automatically trusts requests from devices
+ *   signed into the SAME Tailscale account (returns 403 for all other IPs/accounts).
+ *   Also accepts Authorization: Bearer <token> (and --require-token to enforce token only).
+ * - Zero idle polling: refreshes on-demand with stale-while-revalidate caching.
+ * - Recursive multi-level discovery: automatically chains through downstream hubs
+ *   running hub-relay on the same port (with visited-set loop guard & maxDepth=4).
+ * - Full hub context: exports hub hardware metrics, hub-hosted Orca Bots, hub
+ *   worktree ps attribution, and all downstream paired compute nodes.
  */
 import { execFile } from 'node:child_process'
 import * as crypto from 'node:crypto'
@@ -23,6 +28,7 @@ function parseArgs(argv) {
     else if (a === '--port' && argv[i + 1]) out.port = Number(argv[++i])
     else if (a === '--token' && argv[i + 1]) out.token = argv[++i]
     else if (a === '--env-name' && argv[i + 1]) out.envName = argv[++i]
+    else if (a === '--require-token') out.requireToken = true
     else if (a === '--allow-any') out.allowAny = true
   }
   return out
@@ -31,12 +37,22 @@ function parseArgs(argv) {
 const args = parseArgs(process.argv.slice(2))
 const BIND_HOST = args.host || process.env.HQ_RELAY_HOST || '127.0.0.1'
 const BIND_PORT = Number(args.port || process.env.HQ_RELAY_PORT || 19768)
-const TOKEN = (args.token || process.env.HQ_RELAY_TOKEN || crypto.randomBytes(24).toString('hex')).trim()
+const EXPLICIT_TOKEN = (args.token || process.env.HQ_RELAY_TOKEN || '').trim()
+const TOKEN = EXPLICIT_TOKEN || crypto.randomBytes(24).toString('hex')
+const REQUIRE_TOKEN = Boolean(args.requireToken || process.env.HQ_RELAY_REQUIRE_TOKEN === '1')
 const ENV_HINT = args.envName || process.env.HQ_RELAY_ENV_NAME || os.hostname().replace(/\.local$/i, '')
 
 if ((BIND_HOST === '0.0.0.0' || BIND_HOST === '::') && !args.allowAny) {
   console.error('Refusing to bind 0.0.0.0 without --allow-any. Pass your Tailscale or LAN IP via --host.')
   process.exit(1)
+}
+
+function isTailscaleIp(ip) {
+  const clean = String(ip || '').replace(/^::ffff:/, '')
+  const m = clean.match(/^100\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  if (!m) return false
+  const second = Number(m[1])
+  return second >= 64 && second <= 127
 }
 
 function execFileAsync(file, fileArgs, options = {}) {
@@ -50,6 +66,57 @@ function execFileAsync(file, fileArgs, options = {}) {
 
 function defaultOrcaBin() {
   return process.env.ORCA_CLI_COMMAND || '/Applications/Orca.app/Contents/Resources/bin/orca'
+}
+
+const TAILSCALE_BINS = ['tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale', '/usr/local/bin/tailscale', '/opt/homebrew/bin/tailscale']
+let resolvedTailscaleBin = null
+
+async function runTailscaleJson(tsArgs) {
+  const candidates = resolvedTailscaleBin ? [resolvedTailscaleBin] : TAILSCALE_BINS
+  const tsEnv = { ...process.env, TERM: process.env.TERM || 'dumb' }
+  delete tsEnv.XPC_SERVICE_NAME
+  for (const bin of candidates) {
+    try {
+      const { stdout } = await execFileAsync(bin, tsArgs, { timeout: 4000, maxBuffer: 2 * 1024 * 1024, env: tsEnv })
+      resolvedTailscaleBin = bin
+      return JSON.parse(stdout.trim())
+    } catch {}
+  }
+  return null
+}
+
+let selfTailscaleUserId = null
+let selfTailscaleResolvedAt = 0
+const whoisCache = new Map() // ip -> { allowed: boolean, expiresAt: number }
+
+async function getSelfTailscaleUserId() {
+  const now = Date.now()
+  if (selfTailscaleUserId && now - selfTailscaleResolvedAt < 300_000) return selfTailscaleUserId
+  const st = await runTailscaleJson(['status', '--json'])
+  const uid = st?.Self?.UserID
+  if (uid) {
+    selfTailscaleUserId = String(uid)
+    selfTailscaleResolvedAt = now
+  }
+  return selfTailscaleUserId
+}
+
+async function isSameTailscaleUser(remoteIp) {
+  if (REQUIRE_TOKEN || !isTailscaleIp(BIND_HOST)) return false
+  const ip = String(remoteIp || '').replace(/^::ffff:/, '')
+  if (!isTailscaleIp(ip)) return false
+  const now = Date.now()
+  const cached = whoisCache.get(ip)
+  if (cached && cached.expiresAt > now) return cached.allowed
+
+  const [selfUid, whois] = await Promise.all([
+    getSelfTailscaleUserId(),
+    runTailscaleJson(['whois', '--json', ip])
+  ])
+  const peerUid = whois?.UserProfile?.ID ? String(whois.UserProfile.ID) : null
+  const allowed = Boolean(selfUid && peerUid && selfUid === peerUid)
+  whoisCache.set(ip, { allowed, expiresAt: now + (allowed ? 300_000 : 30_000) })
+  return allowed
 }
 
 async function runOrcaJson(cliArgs, timeoutMs = 15000) {
@@ -241,71 +308,154 @@ function extractEndpointHost(ep) {
   return m ? m[1] : null
 }
 
+function fetchChildRelay(epHost, depth, visitedSet) {
+  return new Promise((resolve) => {
+    if (!epHost || depth > 4) { resolve(null); return }
+    const visited = [...visitedSet].join(',')
+    const url = `http://${epHost}:${BIND_PORT}/v1/relay-snapshot?depth=${depth}&visited=${encodeURIComponent(visited)}`
+    let settled = false
+    const done = (v) => { if (!settled) { settled = true; resolve(v) } }
+    try {
+      const req = http.request(url, { method: 'GET', timeout: 2500 }, (res) => {
+        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) { done(null); return }
+        let raw = ''
+        res.on('data', (ch) => { raw += String(ch); if (raw.length > 8 * 1024 * 1024) done(null) })
+        res.on('end', () => { try { done(JSON.parse(raw)) } catch { done(null) } })
+      })
+      req.on('error', () => done(null))
+      req.on('timeout', () => { try { req.destroy() } catch {} done(null) })
+      req.end()
+    } catch {
+      done(null)
+    }
+  })
+}
+
 let cachedSnapshot = null
 let cachedAt = 0
 let inflight = null
 let lastKnownEnvs = []
 
-function refreshRelaySnapshot() {
-  if (inflight) return inflight
+function refreshRelaySnapshot(depth = 0, visited = new Set()) {
+  if (depth === 0 && inflight) return inflight
 
-  inflight = (async () => {
-    const [hubMetrics, envsRes] = await Promise.all([
+  const run = (async () => {
+    const selfId = ENV_HINT.toLowerCase()
+    const nextVisited = new Set([...visited, selfId, BIND_HOST.toLowerCase()])
+
+    const [hubMetrics, envsRes, botsRes, localPsRes] = await Promise.all([
       collectLocalMetrics(),
-      runOrcaJson(['environment', 'list', '--json'], 15000)
+      runOrcaJson(['environment', 'list', '--json'], 15000),
+      runOrcaJson(['bot', 'list', '--json'], 8000),
+      runOrcaJson(['worktree', 'ps', '--since', '24h', '--json'], 10000)
     ])
     const fetchedEnvs = Array.isArray(envsRes?.environments) ? envsRes.environments : []
     if (fetchedEnvs.length > 0) lastKnownEnvs = fetchedEnvs
     const rawEnvs = fetchedEnvs.length > 0 ? fetchedEnvs : lastKnownEnvs
-    const children = await Promise.all(
+    const hubBots = Array.isArray(botsRes?.bots) ? botsRes.bots : []
+    const hubWorktrees = Array.isArray(localPsRes?.worktrees) ? localPsRes.worktrees : []
+
+    const directChildren = await Promise.all(
       rawEnvs.map(async (env) => {
         const envName = env.name || env.id || 'remote'
         const epHost = extractEndpointHost(env.endpoints?.[0]?.endpoint)
-        const [workersRes, psRes, metrics] = await Promise.all([
+        if (nextVisited.has(envName.toLowerCase()) || (epHost && nextVisited.has(epHost.toLowerCase()))) {
+          return { child: null, nested: [] }
+        }
+        nextVisited.add(envName.toLowerCase())
+        if (epHost) nextVisited.add(epHost.toLowerCase())
+
+        // Probe if this child is itself a downstream hub running hub-relay (recursive multi-level mesh)
+        const childRelay = depth < 4 && epHost ? await fetchChildRelay(epHost, depth + 1, nextVisited) : null
+        const [workersRes, psRes, sshMetrics] = await Promise.all([
           runOrcaJson(['orchestration', 'worker-list', '--environment', envName, '--json'], 10000),
           runOrcaJson(['worktree', 'ps', '--environment', envName, '--since', '24h', '--json'], 10000),
-          collectRemoteMetrics(envName).then((m) => m || (epHost && epHost !== envName ? collectRemoteMetrics(epHost) : null))
+          childRelay?.host?.metrics
+            ? Promise.resolve(null)
+            : collectRemoteMetrics(envName).then((m) => m || (epHost && epHost !== envName ? collectRemoteMetrics(epHost) : null))
         ])
+
         const workers = Array.isArray(workersRes?.workers) ? workersRes.workers : []
-        const remotePs = Array.isArray(psRes?.worktrees) ? psRes.worktrees : []
+        const remotePs = [
+          ...(Array.isArray(psRes?.worktrees) ? psRes.worktrees : []),
+          ...(Array.isArray(childRelay?.host?.worktrees) ? childRelay.host.worktrees : [])
+        ]
+        const metrics = childRelay?.host?.metrics ?? sshMetrics ?? null
+        const childBots = Array.isArray(childRelay?.host?.bots) ? childRelay.host.bots : []
+        const nested = Array.isArray(childRelay?.children)
+          ? childRelay.children.map((nc) => ({
+              ...nc,
+              viaChain: nc.viaChain ? `${envName} -> ${nc.viaChain}` : envName
+            }))
+          : []
+
         return {
-          env,
-          envName,
-          ok: workersRes !== null || psRes !== null || metrics !== null,
-          workers,
-          remotePs,
-          metrics
+          child: {
+            env,
+            envName,
+            ok: workersRes !== null || psRes !== null || metrics !== null || childRelay !== null,
+            workers,
+            remotePs,
+            bots: childBots,
+            metrics
+          },
+          nested
         }
       })
     )
+
+    const children = []
+    const seenChild = new Set()
+    for (const item of directChildren) {
+      if (item.child && !seenChild.has(item.child.envName.toLowerCase())) {
+        seenChild.add(item.child.envName.toLowerCase())
+        children.push(item.child)
+      }
+      for (const nc of item.nested) {
+        const key = String(nc.envName || '').toLowerCase()
+        if (key && !seenChild.has(key)) {
+          seenChild.add(key)
+          children.push(nc)
+        }
+      }
+    }
+
     const out = {
       ok: true,
       generatedAt: Date.now(),
       host: {
         hostname: os.hostname().replace(/\.local$/i, ''),
-        metrics: hubMetrics
+        metrics: hubMetrics,
+        bots: hubBots,
+        worktrees: hubWorktrees
       },
       children
     }
-    cachedSnapshot = out
-    cachedAt = Date.now()
+    if (depth === 0) {
+      cachedSnapshot = out
+      cachedAt = Date.now()
+    }
     return out
   })()
 
-  inflight.finally(() => { inflight = null })
-  return inflight
+  if (depth === 0) {
+    inflight = run
+    run.finally(() => { inflight = null })
+  }
+  return run
 }
 
-async function buildRelaySnapshot() {
+async function buildRelaySnapshot(depth = 0, visited = new Set()) {
+  if (depth > 0) return refreshRelaySnapshot(depth, visited)
   const now = Date.now()
   if (cachedSnapshot) {
-    if (now - cachedAt >= 8000) void refreshRelaySnapshot()
+    if (now - cachedAt >= 8000) void refreshRelaySnapshot(0)
     return cachedSnapshot
   }
-  return refreshRelaySnapshot()
+  return refreshRelaySnapshot(0)
 }
 
-function isAuthorized(req) {
+function hasValidBearer(req) {
   const hdr = String(req.headers.authorization || '')
   const match = hdr.match(/^Bearer\s+(.+)$/i)
   if (!match) return false
@@ -313,6 +463,12 @@ function isAuthorized(req) {
   const expected = Buffer.from(TOKEN, 'utf8')
   if (given.length !== expected.length) return false
   return crypto.timingSafeEqual(given, expected)
+}
+
+async function isAuthorized(req) {
+  if (hasValidBearer(req)) return true
+  if (await isSameTailscaleUser(req.socket?.remoteAddress)) return true
+  return false
 }
 
 function readJsonBody(req) {
@@ -330,64 +486,76 @@ function readJsonBody(req) {
 }
 
 const server = http.createServer((req, res) => {
-  if (!isAuthorized(req)) {
-    res.writeHead(403, { 'Content-Type': 'application/json' })
-    res.end('{"ok":false,"error":"forbidden"}')
-    return
-  }
+  void isAuthorized(req).then((ok) => {
+    if (!ok) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end('{"ok":false,"error":"forbidden"}')
+      return
+    }
 
-  const pathname = (req.url || '/').split('?')[0]
+    const reqUrl = req.url || '/'
+    const qIdx = reqUrl.indexOf('?')
+    const pathname = qIdx >= 0 ? reqUrl.slice(0, qIdx) : reqUrl
+    const params = new URLSearchParams(qIdx >= 0 ? reqUrl.slice(qIdx + 1) : '')
 
-  if (pathname === '/health' && req.method === 'GET') {
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    res.end(JSON.stringify({ ok: true, hostname: os.hostname(), platform: os.platform() }))
-    return
-  }
+    if (pathname === '/health' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify({ ok: true, hostname: os.hostname(), platform: os.platform(), tailscaleAutoAuth: !REQUIRE_TOKEN && isTailscaleIp(BIND_HOST) }))
+      return
+    }
 
-  if (pathname === '/v1/relay-snapshot' && req.method === 'GET') {
-    void buildRelaySnapshot()
-      .then((snap) => {
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-        res.end(JSON.stringify(snap))
-      })
-      .catch(() => {
-        res.writeHead(500, { 'Content-Type': 'application/json' })
-        res.end('{"ok":false,"error":"snapshot_failed"}')
-      })
-    return
-  }
+    if (pathname === '/v1/relay-snapshot' && req.method === 'GET') {
+      const depth = Math.max(0, Math.min(4, parseInt(params.get('depth') || '0', 10) || 0))
+      const visitedRaw = params.get('visited') || ''
+      const visited = new Set(visitedRaw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean))
+      void buildRelaySnapshot(depth, visited)
+        .then((snap) => {
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+          res.end(JSON.stringify(snap))
+        })
+        .catch(() => {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end('{"ok":false,"error":"snapshot_failed"}')
+        })
+      return
+    }
 
-  if (pathname === '/v1/activate-worktree' && req.method === 'POST') {
-    void readJsonBody(req)
-      .then(async (body) => {
-        const host = typeof body?.host === 'string' ? body.host : ''
-        const selector = typeof body?.selector === 'string' ? body.selector : ''
-        if (!/^[a-zA-Z0-9._-]+$/.test(host) || !/^[a-zA-Z0-9._:/@-]+$/.test(selector)) {
+    if (pathname === '/v1/activate-worktree' && req.method === 'POST') {
+      void readJsonBody(req)
+        .then(async (body) => {
+          const host = typeof body?.host === 'string' ? body.host : ''
+          const selector = typeof body?.selector === 'string' ? body.selector : ''
+          if (!/^[a-zA-Z0-9._-]+$/.test(host) || !/^[a-zA-Z0-9._:/@-]+$/.test(selector)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end('{"ok":false,"error":"invalid_params"}')
+            return
+          }
+          const act = await runOrcaJson(['worktree', 'activate', '--environment', host, '--worktree', selector, '--json'], 8000)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: Boolean(act), activated: Boolean(act && act.activated !== false) }))
+        })
+        .catch(() => {
           res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end('{"ok":false,"error":"invalid_params"}')
-          return
-        }
-        const act = await runOrcaJson(['worktree', 'activate', '--environment', host, '--worktree', selector, '--json'])
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ ok: Boolean(act), activated: Boolean(act && act.activated !== false) }))
-      })
-      .catch(() => {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end('{"ok":false,"error":"bad_request"}')
-      })
-    return
-  }
+          res.end('{"ok":false,"error":"bad_request"}')
+        })
+      return
+    }
 
-  res.writeHead(404, { 'Content-Type': 'application/json' })
-  res.end('{"ok":false,"error":"not_found"}')
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end('{"ok":false,"error":"not_found"}')
+  })
 })
 
 server.listen(BIND_PORT, BIND_HOST, () => {
   console.log(`Cyber HQ Hub Relay listening on http://${BIND_HOST}:${BIND_PORT}`)
-  if (!args.token && !process.env.HQ_RELAY_TOKEN) {
-    console.log(`Generated plugin setting (hubRelays): ${ENV_HINT}=http://${BIND_HOST}:${BIND_PORT}#${TOKEN}`)
-  } else {
-    console.log(`Plugin setting (hubRelays): ${ENV_HINT}=http://${BIND_HOST}:${BIND_PORT}#<your-token>`)
+  if (!REQUIRE_TOKEN && isTailscaleIp(BIND_HOST)) {
+    console.log('Zero-config Tailscale WhoIs auth enabled (same-account Tailnet peers connect automatically without token).')
   }
-  void refreshRelaySnapshot()
+  if (!EXPLICIT_TOKEN) {
+    console.log(`Optional explicit plugin setting (hubRelays): ${ENV_HINT}=http://${BIND_HOST}:${BIND_PORT}#${TOKEN}`)
+  } else {
+    console.log(`Optional explicit plugin setting (hubRelays): ${ENV_HINT}=http://${BIND_HOST}:${BIND_PORT}#<your-token>`)
+  }
+  void getSelfTailscaleUserId()
+  void refreshRelaySnapshot(0)
 })

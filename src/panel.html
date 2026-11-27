@@ -2816,7 +2816,9 @@
       recBtn.textContent = 'SAVING...';
       const outMime = blob.type || 'video/webm';
       const ext = outMime.includes('mp4') ? 'mp4' : 'webm';
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const d = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const stamp = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + '_' + pad(d.getHours()) + '-' + pad(d.getMinutes()) + '-' + pad(d.getSeconds());
       const fname = 'cyber-hq-radar-' + stamp + '.' + ext;
 
       const base64 = await blobToBase64(blob);

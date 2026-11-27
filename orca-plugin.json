@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "cyber-hq-radar",
   "name": "Cyber HQ Radar",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "description": "All-in-one cyberpunk fleet command dashboard for Orca: live Bots, multi-host workers, real-time CPU/RAM/Disk/GPU gauges, engine mix icons, fullscreen wallboard, and 1080p video export.",
   "author": {
     "name": "peterhiroshi-hub",
@@ -85,11 +85,11 @@
       },
       {
         "key": "hubRelays",
-        "title": "Hub Relay URLs (Zero-SSH)",
-        "description": "Optional comma-separated envName=http://host:port#token map for paired hubs running scripts/hub-relay.mjs without SSH. Fetches the hub's own hardware metrics plus all downstream paired servers over HTTP with Bearer token auth.",
+        "title": "Hub Relay URLs (Optional Override)",
+        "description": "Optional comma-separated envName=http://host:port#token overrides. On Tailscale, paired hubs running scripts/hub-relay.mjs on port 19768 are discovered automatically with zero config via Tailscale WhoIs.",
         "type": "string",
         "default": "",
-        "placeholder": "hub-mac=http://100.x.y.z:19768#token"
+        "placeholder": "auto (or hub-mac=http://100.x.y.z:19768#token)"
       },
       {
         "key": "showLocalHost",

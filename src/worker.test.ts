@@ -2,6 +2,11 @@ import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import type { CliRunner, HubRelayClient, MetricsRunner, RelayCliRunner, VideoSaver, WallOpener } from './worker'
 import * as main from './worker'
 
+const noopHubRelay: HubRelayClient = {
+  async fetchSnapshot() { return null },
+  async activateWorktree() { return false }
+}
+
 test('collects multi-host bots, workers, and performance metrics, jumps sessions, exports video, and opens fullscreen wall', async () => {
   const host = mockHost({
     results: {
@@ -139,7 +144,7 @@ test('collects multi-host bots, workers, and performance metrics, jumps sessions
 
   const mod = {
     default: (orca: Parameters<typeof main.default>[0]) =>
-      main.default(orca, mockCli, mockMetrics, mockVideoSaver, mockWallOpener),
+      main.default(orca, mockCli, mockMetrics, mockVideoSaver, mockWallOpener, undefined, noopHubRelay),
     deactivate: main.deactivate
   }
   const worker = await mountWorker(mod, { host })
@@ -293,7 +298,8 @@ test('remote console mode monitors a paired control host and hides local laptop 
   }
 
   const mod = {
-    default: (orca: Parameters<typeof main.default>[0]) => main.default(orca, mockCli, mockMetrics),
+    default: (orca: Parameters<typeof main.default>[0]) =>
+      main.default(orca, mockCli, mockMetrics, undefined, undefined, undefined, noopHubRelay),
     deactivate: main.deactivate
   }
   const worker = await mountWorker(mod, { host })
@@ -331,6 +337,14 @@ test('discovers downstream servers via hub SSH relay, attributes multi-host bot 
       }
     }
     if (args[0] === 'bot' && args[1] === 'list') {
+      if (args.includes('hub-mac')) {
+        return {
+          bots: [
+            { id: 'b-del', name: 'Alpha Delivery', agent: 'antigravity', chats: { count: 8 } },
+            { id: 'b-qa', name: 'Alpha QA', agent: 'codex', chats: { count: 5 } }
+          ]
+        }
+      }
       return {
         bots: [
           { id: 'b-local', name: 'Laptop Bot', agent: 'opencode', chats: { count: 2 } },
@@ -449,7 +463,7 @@ test('discovers downstream servers via hub SSH relay, attributes multi-host bot 
 
   const mod = {
     default: (orca: Parameters<typeof main.default>[0]) =>
-      main.default(orca, mockCli, mockMetrics, undefined, undefined, mockRelayCli),
+      main.default(orca, mockCli, mockMetrics, undefined, undefined, mockRelayCli, noopHubRelay),
     deactivate: main.deactivate
   }
   const worker = await mountWorker(mod, { host })
@@ -602,6 +616,105 @@ test('supports zero-SSH HTTP hub relay for hub metrics, downstream GPU/QA discov
   assert.equal(jump.opened, true)
   assert.equal(jump.mode, 'activated')
   assert.deepEqual(activatedArgs, { host: 'gpu-box', selector: 'id:r1::/work/alpha/gpu-task' })
+
+  await worker.deactivate()
+})
+
+test('auto-discovers Tailscale hub relay with zero config and accurately attributes hub-hosted bots and multi-hop children', async () => {
+  const host = mockHost({
+    results: {
+      'settings.get': { settings: {} },
+      'workspace.list': { workspaces: [], truncated: false }
+    }
+  })
+
+  const mockCli: CliRunner = async (args) => {
+    if (args[0] === 'environment' && args[1] === 'list') {
+      return {
+        environments: [
+          { id: 'env-hub', name: 'hub-mac', endpoints: [{ endpoint: 'ws://100.80.1.2:6768' }] }
+        ]
+      }
+    }
+    if (args[0] === 'bot' && args[1] === 'list' && !args.includes('--environment')) {
+      return {
+        bots: [
+          { id: 'b-local', name: 'Laptop Bot', agent: 'opencode', chats: { count: 1 } },
+          { id: 'b-cop', name: 'Orion Copilot', agent: 'antigravity', chats: { count: 5 } },
+          { id: 'b-del', name: 'Alpha Delivery', agent: 'antigravity', chats: { count: 3 } }
+        ]
+      }
+    }
+    return { workers: [], worktrees: [] }
+  }
+
+  const mockMetrics: MetricsRunner = async (hostId) => {
+    if (hostId !== 'local') return null
+    return { cpuPct: 10, ramPct: 45, ramUsedGb: 28, ramTotalGb: 64, diskPct: 50, diskFreeGb: 200, load1: 1.0, cores: 16, osName: 'macOS', gpu: null }
+  }
+
+  let probedUrl = ''
+  const mockHubHttp: HubRelayClient = {
+    async fetchSnapshot(target) {
+      probedUrl = target.baseUrl
+      assert.equal(target.token, '')
+      return {
+        ok: true,
+        host: {
+          hostname: 'hub-mac',
+          metrics: { cpuPct: 21, ramPct: 55, ramUsedGb: 8.8, ramTotalGb: 16, diskPct: 80, diskFreeGb: 40, load1: 1.5, cores: 10, osName: 'macOS', gpu: null },
+          bots: [
+            { id: 'b-cop', name: 'Orion Copilot', agent: 'antigravity' },
+            { id: 'b-del', name: 'Alpha Delivery', agent: 'antigravity' }
+          ],
+          worktrees: [
+            { worktreeId: 'folder:cop', repo: 'Bots', bot: 'Orion Copilot', botHome: true, status: 'working', lastActivityAt: 900 },
+            { worktreeId: 'r1::/work/alpha/task-1', hostId: 'runtime:c1', repo: 'alpha', bot: 'Alpha Delivery', displayName: 'task-1', path: '/work/alpha/task-1', status: 'working', lastActivityAt: 950 }
+          ]
+        },
+        children: [
+          {
+            env: { id: 'c1', name: 'gpu-box', endpoints: [{ endpoint: 'ws://100.80.2.3:6768' }] },
+            envName: 'gpu-box',
+            ok: true,
+            workers: [
+              { dispatchId: 'ctx_auto_1', state: 'working', liveness: 'live', agent: 'antigravity', workspace: 'r1::/work/alpha/task-1' }
+            ],
+            remotePs: [],
+            metrics: { cpuPct: 15, ramPct: 30, ramUsedGb: 10, ramTotalGb: 32, diskPct: 40, diskFreeGb: 100, load1: 1.2, cores: 20, osName: 'Linux', gpu: { name: 'RTX 4070', utilPct: 10, vramUsedMiB: 200, vramTotalMiB: 12282, tempC: 40, powerW: 20 } }
+          },
+          {
+            env: { id: 'c2', name: 'tier3-rack', endpoints: [{ endpoint: 'ws://100.80.3.4:6768' }] },
+            envName: 'tier3-rack',
+            viaChain: 'edge-hub',
+            ok: true,
+            workers: [],
+            remotePs: [],
+            metrics: { cpuPct: 8, ramPct: 22, ramUsedGb: 14, ramTotalGb: 64, diskPct: 20, diskFreeGb: 400, load1: 0.5, cores: 32, osName: 'Linux', gpu: null }
+          }
+        ]
+      }
+    },
+    async activateWorktree() { return true }
+  }
+
+  const mod = {
+    default: (orca: Parameters<typeof main.default>[0]) =>
+      main.default(orca, mockCli, mockMetrics, undefined, undefined, undefined, mockHubHttp),
+    deactivate: main.deactivate
+  }
+  const worker = await mountWorker(mod, { host })
+  const snap = await worker.request('hq.getSnapshot')
+
+  assert.equal(probedUrl, 'http://100.80.1.2:19768')
+  assert.equal(snap.hosts.length, 4)
+  assert.equal(snap.bots.find((b) => b.name === 'Laptop Bot')?.botHost, 'local')
+  assert.equal(snap.bots.find((b) => b.name === 'Orion Copilot')?.botHost, 'hub-mac')
+  assert.equal(snap.bots.find((b) => b.name === 'Orion Copilot')?.primaryHost, 'hub-mac')
+  assert.equal(snap.bots.find((b) => b.name === 'Alpha Delivery')?.botHost, 'hub-mac')
+  assert.equal(snap.bots.find((b) => b.name === 'Alpha Delivery')?.primaryHost, 'gpu-box')
+  assert.equal(snap.workers.find((w) => w.id === 'ctx_auto_1')?.bot, 'Alpha Delivery')
+  assert.ok(snap.hosts.find((h) => h.id === 'tier3-rack')?.role.includes('HUB-MAC → EDGE-HUB'))
 
   await worker.deactivate()
 })

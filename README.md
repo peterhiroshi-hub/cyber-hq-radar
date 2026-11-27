@@ -75,19 +75,21 @@ To run Cyber HQ Radar on your laptop while keeping your Bot control plane on ano
 | --- | --- | --- |
 | `controlEnvironment` | `""` (auto) | Paired Orca environment name hosting your Bots (auto-detected if local Orca has no Bots). |
 | `sshTargets` | `""` | Optional comma-separated `envName=user@host` overrides for SSH CPU/RAM/Disk/GPU telemetry and SSH hub relay discovery. |
-| `hubRelays` | `""` | Optional Zero-SSH HTTP relay map `envName=http://100.x.y.z:19768#token` for hubs running `scripts/hub-relay.mjs`. |
+| `hubRelays` | `""` (auto) | Optional override `envName=http://100.x.y.z:19768#token`. On Tailscale, paired hubs running `scripts/hub-relay.mjs` on port `19768` are discovered automatically with zero config. |
 | `showLocalHost` | `true` | Set `false` on a dedicated monitoring laptop to hide the laptop itself and show only remote cluster machines. |
 | `pollIntervalSec` | `10` | Sweep interval in seconds (`5–120`). |
 
-### Zero-SSH Hub Relay Mode (Optional)
+### Zero-Config Recursive Hub Relay (No SSH / No Token Config Needed on Tailscale)
 
-If your paired hub machine (e.g. a Mac mini) does not have SSH enabled, run the bundled zero-dependency relay on that hub—no `sudo` or SSH daemon required:
+If a paired hub machine (e.g. a Mac mini) does not have SSH enabled—or if you have multi-level topologies (`Laptop → Hub A → Hub B → GPU Workers`)—run the bundled zero-dependency relay on each hub:
 
 ```bash
-node scripts/hub-relay.mjs --host <your-tailscale-ip> --port 19768
+node scripts/hub-relay.mjs --host <your-tailscale-ip>
 ```
 
-It binds strictly to the interface you pass, requires a timing-safe Bearer token, does zero background polling (on-demand stale-while-revalidate), and prints the ready-to-paste `hubRelays` setting value that surfaces both the hub's own hardware gauges and all of its downstream paired worker servers (including GPU/VRAM) in a single request.
+- **Zero-config discovery**: Cyber HQ Radar automatically probes `:19768` on every paired Tailscale environment—no need to fill in `hubRelays` or paste tokens.
+- **Tailscale WhoIs identity auth**: Requests from devices signed into the same Tailscale account are trusted automatically; all other IPs/accounts receive `403` (Bearer token auth is also supported via `--require-token`).
+- **Recursive multi-level mesh**: Hubs automatically chain through downstream hubs (with loop protection & max depth 4), surfacing hub-hosted Bot ownership, live hardware/GPU gauges, and downstream worker attribution in a single stale-while-revalidate response with zero idle polling.
 
 ---
 

@@ -52,15 +52,22 @@ export type HubRelayTarget = {
 export type HubRelayChildPayload = {
   env?: RawEnv
   envName?: string
+  viaChain?: string
   ok?: boolean
   workers?: RawRemoteWorker[]
   remotePs?: RawWorktreePs[]
+  bots?: RawBot[]
   metrics?: HostMetrics | null
 }
 
 export type HubRelaySnapshotPayload = {
   ok?: boolean
-  host?: { hostname?: string; metrics?: HostMetrics | null }
+  host?: {
+    hostname?: string
+    metrics?: HostMetrics | null
+    bots?: RawBot[]
+    worktrees?: RawWorktreePs[]
+  }
   children?: HubRelayChildPayload[]
 }
 
@@ -77,6 +84,14 @@ export type PluginConfig = {
   pollIntervalSec: number
 }
 
+function isTailscaleIp(ip: string | null | undefined): boolean {
+  if (!ip) return false
+  const m = ip.trim().match(/^100\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  if (!m) return false
+  const second = Number(m[1])
+  return second >= 64 && second <= 127
+}
+
 export function parseHubRelays(raw: string | undefined | null): Record<string, HubRelayTarget> {
   const out: Record<string, HubRelayTarget> = {}
   if (!raw) return out
@@ -88,10 +103,9 @@ export function parseHubRelays(raw: string | undefined | null): Record<string, H
     const key = trimmed.slice(0, eq).trim()
     const rest = trimmed.slice(eq + 1).trim()
     const sepIdx = rest.includes('#') ? rest.indexOf('#') : rest.indexOf('|')
-    if (sepIdx <= 0) continue
-    const baseUrl = rest.slice(0, sepIdx).trim().replace(/\/+$/, '')
-    const token = rest.slice(sepIdx + 1).trim()
-    if (!key || !token || !/^https?:\/\/[^/\s]+/i.test(baseUrl)) continue
+    const baseUrl = (sepIdx > 0 ? rest.slice(0, sepIdx) : rest).trim().replace(/\/+$/, '')
+    const token = sepIdx > 0 ? rest.slice(sepIdx + 1).trim() : ''
+    if (!key || !/^https?:\/\/[^/\s]+/i.test(baseUrl)) continue
     const entry: HubRelayTarget = { baseUrl, token }
     out[key] = entry
     out[key.toLowerCase()] = entry
@@ -111,9 +125,9 @@ function httpJsonRequest(
     const mod = isHttps ? https : http
     const bodyStr = bodyObj !== undefined ? JSON.stringify(bodyObj) : null
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${token}`,
       Accept: 'application/json'
     }
+    if (token) headers.Authorization = `Bearer ${token}`
     if (bodyStr !== null) {
       headers['Content-Type'] = 'application/json'
       headers['Content-Length'] = String(Buffer.from(bodyStr, 'utf8').length)
@@ -284,7 +298,9 @@ export async function defaultVideoSaver(input: SaveVideoInput): Promise<SaveVide
   if (bytesBuf.length === 0 || bytesBuf.length > 64 * 1024 * 1024) {
     return { saved: false, path: null, bytes: bytesBuf.length, format, error: 'Video size out of bounds' }
   }
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+  const now = new Date()
+  const pad2 = (n: number) => String(n).padStart(2, '0')
+  const stamp = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}_${pad2(now.getHours())}-${pad2(now.getMinutes())}-${pad2(now.getSeconds())}`
   const cleanName = input.filename
     ? path.basename(input.filename).replace(/[^a-zA-Z0-9._-]/g, '_')
     : `cyber-hq-radar-${stamp}.${format}`
@@ -516,8 +532,12 @@ export function classifySquad(name: string | null | undefined, knownSquads?: Ite
   const lower = raw.toLowerCase()
   if (lower.includes('copilot') || lower.includes('orchestrator') || lower.includes('hq')) return 'command'
   if (knownSquads) {
+    const tokens = lower.split(/[^a-z0-9]+/).filter((t) => t.length >= 3)
     for (const sq of knownSquads) {
-      if (sq && sq !== 'command' && sq !== 'fleet' && lower.includes(sq)) return sq
+      if (!sq || sq === 'command' || sq === 'fleet') continue
+      if (lower.includes(sq)) return sq
+      // Match abbreviated repo/ticket prefixes (e.g. 4+ char prefix of a known squad name)
+      if (tokens.some((t) => t.length >= 4 && sq.startsWith(t))) return sq
     }
   }
   const wsMatch = lower.match(/\/workspaces\/([^/]+)/)
@@ -716,6 +736,7 @@ export async function collectHqSnapshot(
     ok: boolean
     workers: RawRemoteWorker[]
     remotePs: RawWorktreePs[]
+    hostedBots: RawBot[]
     metrics: HostMetrics | null
   }
 
@@ -724,37 +745,50 @@ export async function collectHqSnapshot(
       const envName = env.name || env.id || 'remote'
       const endpointHost = extractEndpointHost(env.endpoints?.[0]?.endpoint)
       const sshTarget = lookupSshTarget(cfg, envName, endpointHost)
-      const httpRelay = cfg.hubRelays[envName] || cfg.hubRelays[envName.toLowerCase()] || null
-      const [res, remotePsRes, httpRelaySnap, sshMetrics] = await Promise.all([
+      const explicitRelay = cfg.hubRelays[envName] || cfg.hubRelays[envName.toLowerCase()] || null
+      // Zero-config Tailscale WhoIs auto-discovery on default relay port 19768
+      const probeRelay: HubRelayTarget | null =
+        explicitRelay || (isTailscaleIp(endpointHost) ? { baseUrl: `http://${endpointHost}:19768`, token: '' } : null)
+      const [res, remotePsRes, envBotsRes, httpRelaySnap] = await Promise.all([
         cli(['orchestration', 'worker-list', '--environment', envName, '--json']),
         cli(['worktree', 'ps', '--environment', envName, '--since', '24h', '--json']),
-        httpRelay ? hubRelayClient.fetchSnapshot(httpRelay).catch(() => null) : Promise.resolve(null),
-        httpRelay ? Promise.resolve(null) : metricsRunner(envName, sshTarget, null).catch(() => null)
+        cli(['bot', 'list', '--environment', envName, '--json']),
+        probeRelay ? hubRelayClient.fetchSnapshot(probeRelay).catch(() => null) : Promise.resolve(null)
       ])
-      const metrics = httpRelaySnap?.host?.metrics ?? sshMetrics ?? (httpRelay ? await metricsRunner(envName, sshTarget, null).catch(() => null) : null)
+      const activeHttpRelay = httpRelaySnap ? probeRelay : null
+      const metrics =
+        httpRelaySnap?.host?.metrics ?? (await metricsRunner(envName, sshTarget, null).catch(() => null))
       const workers = Array.isArray((res as { workers?: unknown })?.workers)
         ? ((res as { workers: RawRemoteWorker[] }).workers)
         : []
-      const remotePs = Array.isArray((remotePsRes as { worktrees?: unknown })?.worktrees)
+      const cliRemotePs = Array.isArray((remotePsRes as { worktrees?: unknown })?.worktrees)
         ? ((remotePsRes as { worktrees: RawWorktreePs[] }).worktrees)
         : []
+      const relayWorktrees = Array.isArray(httpRelaySnap?.host?.worktrees) ? httpRelaySnap.host.worktrees : []
+      const remotePs = relayWorktrees.length > 0 ? [...relayWorktrees, ...cliRemotePs] : cliRemotePs
+      const relayBots = Array.isArray(httpRelaySnap?.host?.bots) ? httpRelaySnap.host.bots : []
+      const cliBots = Array.isArray((envBotsRes as { bots?: unknown })?.bots)
+        ? ((envBotsRes as { bots: RawBot[] }).bots)
+        : []
+      const hostedBots = relayBots.length > 0 ? relayBots : cliBots
       return {
         env,
         envName,
         sshTarget,
-        httpRelay,
+        httpRelay: activeHttpRelay,
         httpRelaySnap,
         viaHub: null,
         viaHubSsh: null,
         ok: res !== null || remotePsRes !== null || httpRelaySnap !== null,
         workers,
         remotePs,
+        hostedBots,
         metrics
       }
     })
   )
 
-  // Hub Relay Discovery: prefer Zero-SSH HTTP Hub Relay when configured, else fall back to SSH Hub Relay
+  // Hub Relay Discovery: prefer Zero-SSH HTTP Hub Relay (explicit or Tailscale auto-discovered), else fall back to SSH Hub Relay
   const seenEnvNames = new Set<string>(['local', ...directRemoteResults.map((r) => r.envName.toLowerCase())])
   const localHostNorm = cleanLocalHostLabel().toLowerCase()
   const relayedResults: RemoteHostResult[] = []
@@ -768,17 +802,19 @@ export async function collectHqSnapshot(
       if (seenEnvNames.has(lower) || lower === localHostNorm) continue
       seenEnvNames.add(lower)
       if (hubHttpByHostOut) hubHttpByHostOut.set(childName, hub.httpRelay)
+      const viaLabel = ch.viaChain ? `${hub.envName} → ${ch.viaChain}` : hub.envName
       relayedResults.push({
         env: ch.env || { name: childName },
         envName: childName,
         sshTarget: childName,
         httpRelay: null,
         httpRelaySnap: null,
-        viaHub: hub.envName,
+        viaHub: viaLabel,
         viaHubSsh: null,
         ok: Boolean(ch.ok || ch.metrics || (ch.workers && ch.workers.length) || (ch.remotePs && ch.remotePs.length)),
         workers: Array.isArray(ch.workers) ? ch.workers : [],
         remotePs: Array.isArray(ch.remotePs) ? ch.remotePs : [],
+        hostedBots: Array.isArray(ch.bots) ? ch.bots : [],
         metrics: ch.metrics ?? null
       })
     }
@@ -836,6 +872,7 @@ export async function collectHqSnapshot(
             ok: res !== null || remotePsRes !== null || metrics !== null,
             workers,
             remotePs,
+            hostedBots: [],
             metrics
           }
         })()
@@ -847,6 +884,18 @@ export async function collectHqSnapshot(
   }
 
   const remoteResults: RemoteHostResult[] = [...directRemoteResults, ...relayedResults]
+
+  // Merge any Bots reported by remote hubs that weren't in local rawBots
+  const knownBotNames = new Set(rawBots.map((b) => (b.name || '').toLowerCase()))
+  for (const r of remoteResults) {
+    for (const hb of r.hostedBots) {
+      const k = (hb.name || '').toLowerCase()
+      if (k && !knownBotNames.has(k)) {
+        knownBotNames.add(k)
+        rawBots.push(hb)
+      }
+    }
+  }
 
   const rawLocalPs: RawWorktreePs[] = Array.isArray((localPsRes as { worktrees?: unknown })?.worktrees)
     ? ((localPsRes as { worktrees: RawWorktreePs[] }).worktrees)
@@ -862,23 +911,29 @@ export async function collectHqSnapshot(
     }
   }
 
-  // Index Bot Homes across ALL machines (local + every paired/relayed host) for true per-Bot machine ownership
+  // Index Bot Homes & Environment IDs across ALL machines (stripping runtime: prefix)
   const envNameById = new Map<string, string>()
-  for (const env of rawEnvs) {
-    const name = env.name || env.id || ''
+  for (const r of remoteResults) {
+    const name = r.envName
     if (!name) continue
     envNameById.set(name.toLowerCase(), name)
-    if (env.id) envNameById.set(env.id.toLowerCase(), name)
+    if (r.env.id) {
+      envNameById.set(r.env.id.toLowerCase(), name)
+      envNameById.set(`runtime:${r.env.id.toLowerCase()}`, name)
+    }
   }
   const resolveHostId = (rawHostId?: string | null): HostId => {
     if (!rawHostId || rawHostId === 'local') return 'local'
-    return envNameById.get(rawHostId.toLowerCase()) || rawHostId
+    const lower = rawHostId.toLowerCase()
+    const stripped = lower.replace(/^runtime:/, '')
+    return envNameById.get(lower) || envNameById.get(stripped) || rawHostId
   }
 
   const psByBotHome = new Map<string, RawWorktreePs>()
   const botHostByName = new Map<string, HostId>()
   const botNameByWorkspaceId = new Map<string, string>()
   const hostWsByBotName = new Map<string, string>()
+  const globalPsByWorkspace = new Map<string, RawWorktreePs>()
 
   for (const ws of hostWorkspaces) {
     if (ws.kind === 'folder' && ws.name) {
@@ -887,22 +942,39 @@ export async function collectHqSnapshot(
     }
   }
 
+  const localBotHomes = new Set<string>()
   for (const row of rawLocalPs) {
+    if (row.worktreeId && !globalPsByWorkspace.has(row.worktreeId)) {
+      globalPsByWorkspace.set(row.worktreeId, row)
+    }
     if (row.botHome && row.bot) {
       const ownerHost = resolveHostId(row.hostId)
       psByBotHome.set(row.bot, row)
       botHostByName.set(row.bot, ownerHost)
+      if (ownerHost === 'local') localBotHomes.add(row.bot)
       if (row.worktreeId) botNameByWorkspaceId.set(row.worktreeId, row.bot)
     }
   }
 
-  for (const { envName, remotePs } of remoteResults) {
+  // Authoritative Bot ownership from each remote/relayed host's own bot list & botHome records
+  for (const { envName, remotePs, hostedBots, httpRelay } of remoteResults) {
+    for (const hb of hostedBots) {
+      if (hb.name && (httpRelay || !localBotHomes.has(hb.name))) {
+        botHostByName.set(hb.name, envName)
+      }
+    }
     for (const row of remotePs) {
+      if (row.worktreeId) {
+        const existing = globalPsByWorkspace.get(row.worktreeId)
+        if (!existing || (row.bot && !existing.bot) || (row.lastActivityAt ?? 0) > (existing.lastActivityAt ?? 0)) {
+          globalPsByWorkspace.set(row.worktreeId, row)
+        }
+      }
       if (row.botHome && row.bot) {
         const existingHost = botHostByName.get(row.bot)
         const existingTs = psByBotHome.get(row.bot)?.lastActivityAt ?? -1
         const nextTs = row.lastActivityAt ?? 0
-        if (!existingHost || existingHost === 'local' || nextTs >= existingTs) {
+        if (!existingHost || existingHost === 'local' || existingHost === envName || nextTs >= existingTs) {
           psByBotHome.set(row.bot, row)
           botHostByName.set(row.bot, envName)
         }
@@ -976,7 +1048,7 @@ export async function collectHqSnapshot(
       if (wtId) seenWorkspaces.add(wtId)
       const bestAgent = pickBestAgent(row.agents)
       const state = mapWorkerState(row.status, undefined, bestAgent?.state)
-      const host = row.hostId && row.hostId !== 'local' ? row.hostId : 'local'
+      const host = resolveHostId(row.hostId)
       const parentWsKey = row.crossStoreParent?.parent?.workspaceKey || null
       const parentBotName = (parentWsKey && botNameByWorkspaceId.get(parentWsKey)) || row.bot || null
       const squad = classifySquad(parentBotName || `${row.repo || ''} ${row.branch || ''} ${row.path || ''}`, knownSquads)
@@ -1013,7 +1085,7 @@ export async function collectHqSnapshot(
       const ws = w.workspace || ''
       if (ws && seenRemoteWs.has(ws)) continue
       if (ws) seenRemoteWs.add(ws)
-      const matchedPs = ws ? psByWorkspace.get(ws) : undefined
+      const matchedPs = ws ? (psByWorkspace.get(ws) || globalPsByWorkspace.get(ws)) : undefined
       if (matchedPs?.botHome || matchedPs?.repo === 'Bots') continue
       const bestAgent = pickBestAgent(matchedPs?.agents)
       const wsPath = matchedPs?.path || (ws.includes('::') ? ws.split('::')[1] : ws)
@@ -1022,7 +1094,7 @@ export async function collectHqSnapshot(
       if (mapped !== 'working' && workers.filter((x) => x.host === envName).length >= 5) continue
 
       const parentWsKey = matchedPs?.crossStoreParent?.parent?.workspaceKey || null
-      const parentBotName = parentWsKey ? (botNameByWorkspaceId.get(parentWsKey) ?? null) : null
+      const parentBotName = (parentWsKey ? botNameByWorkspaceId.get(parentWsKey) : null) || matchedPs?.bot || null
       const squad = classifySquad(parentBotName || `${matchedPs?.repo || ''} ${wsPath} ${shortName}`, knownSquads)
       const bot = inferBotFromKnownBots(squad, `${envName} ${shortName} ${wsPath}`, parentBotName)
 
@@ -1050,12 +1122,15 @@ export async function collectHqSnapshot(
       const ws = rps.worktreeId || ''
       if (!ws || seenRemoteWs.has(ws)) continue
       if (rps.botHome || rps.repo === 'Bots') continue
+      // Skip worktrees whose resolved runtime host belongs to a different paired node (e.g. hub's ps listing a downstream Ubuntu worker)
+      const rpsResolvedHost = rps.hostId && rps.hostId !== 'local' ? resolveHostId(rps.hostId) : envName
+      if (rpsResolvedHost !== envName) continue
       seenRemoteWs.add(ws)
       const bestAgent = pickBestAgent(rps.agents)
       const mapped = mapWorkerState(rps.status, undefined, bestAgent?.state)
       if (mapped !== 'working' && workers.filter((x) => x.host === envName).length >= 5) continue
       const parentWsKey = rps.crossStoreParent?.parent?.workspaceKey || null
-      const parentBotName = parentWsKey ? (botNameByWorkspaceId.get(parentWsKey) ?? null) : null
+      const parentBotName = (parentWsKey ? botNameByWorkspaceId.get(parentWsKey) : null) || rps.bot || null
       const squad = classifySquad(parentBotName || `${rps.repo || ''} ${rps.path || ''}`, knownSquads)
       const bot = inferBotFromKnownBots(squad, `${envName} ${rps.displayName || ''} ${rps.path || ''}`, parentBotName)
       workers.push({
