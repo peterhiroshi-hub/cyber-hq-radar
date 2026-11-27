@@ -164,7 +164,7 @@ function httpJsonRequest(
 
 export const defaultHubRelayClient: HubRelayClient = {
   async fetchSnapshot(target) {
-    const res = await httpJsonRequest(`${target.baseUrl}/v1/relay-snapshot`, 'GET', target.token, undefined, 6000)
+    const res = await httpJsonRequest(`${target.baseUrl}/v1/relay-snapshot`, 'GET', target.token, undefined, 10000)
     return res && typeof res === 'object' ? (res as HubRelaySnapshotPayload) : null
   },
   async activateWorktree(target, host, selector) {
@@ -381,7 +381,7 @@ export async function collectRemoteHostMetrics(
   if (!sshTarget || !/^[a-zA-Z0-9._@-]+$/.test(sshTarget)) return null
   if (viaHubSsh && !/^[a-zA-Z0-9._@-]+$/.test(viaHubSsh)) return null
   const remoteScript = [
-    'OS=$(uname -s); echo "OS:$OS"',
+    'OS=$(uname -s); echo "OS:$OS";',
     'if [ "$OS" = "Darwin" ]; then',
     '  sysctl -n hw.ncpu; sysctl -n hw.memsize;',
     '  top -l 2 -n 0 -s 0 | awk \'/CPU usage:/{line=$0} END{print line}\';',

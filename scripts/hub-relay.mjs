@@ -52,10 +52,10 @@ function defaultOrcaBin() {
   return process.env.ORCA_CLI_COMMAND || '/Applications/Orca.app/Contents/Resources/bin/orca'
 }
 
-async function runOrcaJson(cliArgs) {
+async function runOrcaJson(cliArgs, timeoutMs = 15000) {
   try {
     const { stdout } = await execFileAsync(defaultOrcaBin(), cliArgs, {
-      timeout: 4500,
+      timeout: timeoutMs,
       maxBuffer: 4 * 1024 * 1024,
       env: { ...process.env }
     })
@@ -142,7 +142,7 @@ async function collectLocalMetrics() {
 async function collectRemoteMetrics(sshTarget) {
   if (!sshTarget || !/^[a-zA-Z0-9._@-]+$/.test(sshTarget)) return null
   const remoteScript = [
-    'OS=$(uname -s); echo "OS:$OS"',
+    'OS=$(uname -s); echo "OS:$OS";',
     'if [ "$OS" = "Darwin" ]; then',
     '  sysctl -n hw.ncpu; sysctl -n hw.memsize;',
     '  top -l 2 -n 0 -s 0 | awk \'/CPU usage:/{line=$0} END{print line}\';',
@@ -173,7 +173,7 @@ async function collectRemoteMetrics(sshTarget) {
         sshTarget,
         remoteScript
       ],
-      { timeout: 4500 }
+      { timeout: 6000 }
     )
     const lines = stdout.trim().split('\n').map((s) => s.trim()).filter(Boolean)
     if (lines.length < 5) return null
@@ -244,25 +244,26 @@ function extractEndpointHost(ep) {
 let cachedSnapshot = null
 let cachedAt = 0
 let inflight = null
+let lastKnownEnvs = []
 
-async function buildRelaySnapshot() {
-  const now = Date.now()
-  if (cachedSnapshot && now - cachedAt < 4000) return cachedSnapshot
+function refreshRelaySnapshot() {
   if (inflight) return inflight
 
   inflight = (async () => {
     const [hubMetrics, envsRes] = await Promise.all([
       collectLocalMetrics(),
-      runOrcaJson(['environment', 'list', '--json'])
+      runOrcaJson(['environment', 'list', '--json'], 15000)
     ])
-    const rawEnvs = Array.isArray(envsRes?.environments) ? envsRes.environments : []
+    const fetchedEnvs = Array.isArray(envsRes?.environments) ? envsRes.environments : []
+    if (fetchedEnvs.length > 0) lastKnownEnvs = fetchedEnvs
+    const rawEnvs = fetchedEnvs.length > 0 ? fetchedEnvs : lastKnownEnvs
     const children = await Promise.all(
       rawEnvs.map(async (env) => {
         const envName = env.name || env.id || 'remote'
         const epHost = extractEndpointHost(env.endpoints?.[0]?.endpoint)
         const [workersRes, psRes, metrics] = await Promise.all([
-          runOrcaJson(['orchestration', 'worker-list', '--environment', envName, '--json']),
-          runOrcaJson(['worktree', 'ps', '--environment', envName, '--since', '24h', '--json']),
+          runOrcaJson(['orchestration', 'worker-list', '--environment', envName, '--json'], 10000),
+          runOrcaJson(['worktree', 'ps', '--environment', envName, '--since', '24h', '--json'], 10000),
           collectRemoteMetrics(envName).then((m) => m || (epHost && epHost !== envName ? collectRemoteMetrics(epHost) : null))
         ])
         const workers = Array.isArray(workersRes?.workers) ? workersRes.workers : []
@@ -291,11 +292,17 @@ async function buildRelaySnapshot() {
     return out
   })()
 
-  try {
-    return await inflight
-  } finally {
-    inflight = null
+  inflight.finally(() => { inflight = null })
+  return inflight
+}
+
+async function buildRelaySnapshot() {
+  const now = Date.now()
+  if (cachedSnapshot) {
+    if (now - cachedAt >= 8000) void refreshRelaySnapshot()
+    return cachedSnapshot
   }
+  return refreshRelaySnapshot()
 }
 
 function isAuthorized(req) {
@@ -377,5 +384,10 @@ const server = http.createServer((req, res) => {
 
 server.listen(BIND_PORT, BIND_HOST, () => {
   console.log(`Cyber HQ Hub Relay listening on http://${BIND_HOST}:${BIND_PORT}`)
-  console.log(`Plugin setting (hubRelays): ${ENV_HINT}=http://${BIND_HOST}:${BIND_PORT}#${TOKEN}`)
+  if (!args.token && !process.env.HQ_RELAY_TOKEN) {
+    console.log(`Generated plugin setting (hubRelays): ${ENV_HINT}=http://${BIND_HOST}:${BIND_PORT}#${TOKEN}`)
+  } else {
+    console.log(`Plugin setting (hubRelays): ${ENV_HINT}=http://${BIND_HOST}:${BIND_PORT}#<your-token>`)
+  }
+  void refreshRelaySnapshot()
 })
