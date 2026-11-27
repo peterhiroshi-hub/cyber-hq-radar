@@ -243,9 +243,10 @@
   body.wall-mode .ws-title { font-size: 9.5px; }
   body.wall-mode .ws-sub { font-size: 8.4px; }
   body.wall-mode .inspector { font-size: 9.5px; padding: 4px 10px; }
-  body.wall-mode .ticker { padding: 4px 10px; }
-  body.wall-mode .ticker-head { font-size: 8px; margin-bottom: 2px; }
-  body.wall-mode .log-list { font-size: 9px; max-height: 38px; gap: 1px; }
+  body.wall-mode .ticker { padding: 5px 10px; }
+  body.wall-mode .ticker-head { font-size: 8.5px; margin-bottom: 3px; }
+  body.wall-mode .log-list { font-size: 9.8px; max-height: 47px; }
+  body.wall-mode .log-line { line-height: 1.45; }
 
   /* ALL-IN-ONE 3-LAYER COMMAND DECK */
   .deck-stage {
@@ -822,10 +823,17 @@
   .ticker-head b { color: var(--cyan); }
   .log-list {
     font-family: var(--mono); font-size: 8.8px;
-    display: flex; flex-direction: column; gap: 2px;
-    max-height: 70px; overflow-y: auto;
+    display: block;
+    max-height: 76px; overflow-y: auto;
   }
-  .log-line { color: #9dbde0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .log-line {
+    color: #9dbde0;
+    line-height: 1.45;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .log-line + .log-line { margin-top: 2px; }
   .log-line span.ts { color: var(--cyan); margin-right: 5px; }
 </style>
 </head>

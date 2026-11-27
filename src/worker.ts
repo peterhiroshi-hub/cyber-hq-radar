@@ -1468,7 +1468,12 @@ export default function activate(
   const hubHttpByHost = new Map<string, HubRelayTarget>()
 
   const pushLog = (kind: HqEventEntry['kind'], message: string) => {
-    eventLog.unshift({ ts: Date.now(), kind, message })
+    const now = Date.now()
+    if (eventLog[0] && eventLog[0].kind === kind && eventLog[0].message === message && now - eventLog[0].ts < 15_000) {
+      eventLog[0].ts = now
+      return
+    }
+    eventLog.unshift({ ts: now, kind, message })
     if (eventLog.length > 24) eventLog.length = 24
   }
 
