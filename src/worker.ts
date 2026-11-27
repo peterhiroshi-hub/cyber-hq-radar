@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process'
 import * as crypto from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as http from 'node:http'
+import * as https from 'node:https'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -43,11 +44,139 @@ export type MetricsRunner = (hostId: string, sshTarget?: string | null, hubSshTa
 export type VideoSaver = (input: SaveVideoInput) => Promise<SaveVideoOutput>
 export type WallOpener = (url: string) => Promise<boolean>
 
+export type HubRelayTarget = {
+  baseUrl: string
+  token: string
+}
+
+export type HubRelayChildPayload = {
+  env?: RawEnv
+  envName?: string
+  ok?: boolean
+  workers?: RawRemoteWorker[]
+  remotePs?: RawWorktreePs[]
+  metrics?: HostMetrics | null
+}
+
+export type HubRelaySnapshotPayload = {
+  ok?: boolean
+  host?: { hostname?: string; metrics?: HostMetrics | null }
+  children?: HubRelayChildPayload[]
+}
+
+export type HubRelayClient = {
+  fetchSnapshot: (target: HubRelayTarget) => Promise<HubRelaySnapshotPayload | null>
+  activateWorktree: (target: HubRelayTarget, host: string, selector: string) => Promise<boolean>
+}
+
 export type PluginConfig = {
   controlEnvironment: string
   sshTargets: Record<string, string>
+  hubRelays: Record<string, HubRelayTarget>
   showLocalHost: boolean
   pollIntervalSec: number
+}
+
+export function parseHubRelays(raw: string | undefined | null): Record<string, HubRelayTarget> {
+  const out: Record<string, HubRelayTarget> = {}
+  if (!raw) return out
+  for (const part of String(raw).split(/[,;\n]/)) {
+    const trimmed = part.trim()
+    if (!trimmed) continue
+    const eq = trimmed.indexOf('=')
+    if (eq <= 0) continue
+    const key = trimmed.slice(0, eq).trim()
+    const rest = trimmed.slice(eq + 1).trim()
+    const sepIdx = rest.includes('#') ? rest.indexOf('#') : rest.indexOf('|')
+    if (sepIdx <= 0) continue
+    const baseUrl = rest.slice(0, sepIdx).trim().replace(/\/+$/, '')
+    const token = rest.slice(sepIdx + 1).trim()
+    if (!key || !token || !/^https?:\/\/[^/\s]+/i.test(baseUrl)) continue
+    const entry: HubRelayTarget = { baseUrl, token }
+    out[key] = entry
+    out[key.toLowerCase()] = entry
+  }
+  return out
+}
+
+function httpJsonRequest(
+  url: string,
+  method: 'GET' | 'POST',
+  token: string,
+  bodyObj?: unknown,
+  timeoutMs = 5500
+): Promise<unknown | null> {
+  return new Promise((resolve) => {
+    const isHttps = url.toLowerCase().startsWith('https://')
+    const mod = isHttps ? https : http
+    const bodyStr = bodyObj !== undefined ? JSON.stringify(bodyObj) : null
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json'
+    }
+    if (bodyStr !== null) {
+      headers['Content-Type'] = 'application/json'
+      headers['Content-Length'] = String(Buffer.from(bodyStr, 'utf8').length)
+    }
+    let settled = false
+    const done = (val: unknown | null) => {
+      if (settled) return
+      settled = true
+      resolve(val)
+    }
+    try {
+      const req = mod.request(url, { method, headers, timeout: timeoutMs }, (res) => {
+        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+          done(null)
+          return
+        }
+        let raw = ''
+        let total = 0
+        res.on('data', (chunk) => {
+          const s = typeof chunk === 'string' ? chunk : String(chunk)
+          total += s.length
+          if (total > 8 * 1024 * 1024) {
+            done(null)
+            return
+          }
+          raw += s
+        })
+        res.on('end', () => {
+          try {
+            done(raw ? JSON.parse(raw) : null)
+          } catch {
+            done(null)
+          }
+        })
+      })
+      req.on('error', () => done(null))
+      req.on('timeout', () => {
+        try { req.destroy() } catch {}
+        done(null)
+      })
+      if (bodyStr !== null) req.write(bodyStr)
+      req.end()
+    } catch {
+      done(null)
+    }
+  })
+}
+
+export const defaultHubRelayClient: HubRelayClient = {
+  async fetchSnapshot(target) {
+    const res = await httpJsonRequest(`${target.baseUrl}/v1/relay-snapshot`, 'GET', target.token, undefined, 6000)
+    return res && typeof res === 'object' ? (res as HubRelaySnapshotPayload) : null
+  },
+  async activateWorktree(target, host, selector) {
+    const res = await httpJsonRequest(
+      `${target.baseUrl}/v1/activate-worktree`,
+      'POST',
+      target.token,
+      { host, selector },
+      4500
+    )
+    return Boolean(res && (res as { activated?: boolean }).activated)
+  }
 }
 
 export function parseSshTargets(raw: string | undefined | null): Record<string, string> {
@@ -509,10 +638,11 @@ async function readPluginConfig(orca: OrcaWorkerApi): Promise<PluginConfig> {
   const s = (res?.settings ?? {}) as Record<string, unknown>
   const controlEnvironment = typeof s.controlEnvironment === 'string' ? s.controlEnvironment.trim() : ''
   const sshTargets = parseSshTargets(typeof s.sshTargets === 'string' ? s.sshTargets : '')
+  const hubRelays = parseHubRelays(typeof s.hubRelays === 'string' ? s.hubRelays : '')
   const showLocalHost = typeof s.showLocalHost === 'boolean' ? s.showLocalHost : true
   const rawPoll = typeof s.pollIntervalSec === 'number' ? s.pollIntervalSec : 10
   const pollIntervalSec = Math.max(5, Math.min(120, Math.round(rawPoll)))
-  return { controlEnvironment, sshTargets, showLocalHost, pollIntervalSec }
+  return { controlEnvironment, sshTargets, hubRelays, showLocalHost, pollIntervalSec }
 }
 
 export async function collectHqSnapshot(
@@ -521,7 +651,9 @@ export async function collectHqSnapshot(
   metricsRunner: MetricsRunner,
   eventLog: HqEventEntry[],
   relayCli: RelayCliRunner = runRelayedOrcaCliJson,
-  hubSshByHostOut?: Map<string, string>
+  hubSshByHostOut?: Map<string, string>,
+  hubRelayClient: HubRelayClient = defaultHubRelayClient,
+  hubHttpByHostOut?: Map<string, HubRelayTarget>
 ): Promise<HqSnapshot> {
   const cfg = await readPluginConfig(orca)
 
@@ -577,6 +709,8 @@ export async function collectHqSnapshot(
     env: RawEnv
     envName: string
     sshTarget: string
+    httpRelay: HubRelayTarget | null
+    httpRelaySnap: HubRelaySnapshotPayload | null
     viaHub: string | null
     viaHubSsh: string | null
     ok: boolean
@@ -590,11 +724,14 @@ export async function collectHqSnapshot(
       const envName = env.name || env.id || 'remote'
       const endpointHost = extractEndpointHost(env.endpoints?.[0]?.endpoint)
       const sshTarget = lookupSshTarget(cfg, envName, endpointHost)
-      const [res, remotePsRes, metrics] = await Promise.all([
+      const httpRelay = cfg.hubRelays[envName] || cfg.hubRelays[envName.toLowerCase()] || null
+      const [res, remotePsRes, httpRelaySnap, sshMetrics] = await Promise.all([
         cli(['orchestration', 'worker-list', '--environment', envName, '--json']),
         cli(['worktree', 'ps', '--environment', envName, '--since', '24h', '--json']),
-        metricsRunner(envName, sshTarget, null).catch(() => null)
+        httpRelay ? hubRelayClient.fetchSnapshot(httpRelay).catch(() => null) : Promise.resolve(null),
+        httpRelay ? Promise.resolve(null) : metricsRunner(envName, sshTarget, null).catch(() => null)
       ])
+      const metrics = httpRelaySnap?.host?.metrics ?? sshMetrics ?? (httpRelay ? await metricsRunner(envName, sshTarget, null).catch(() => null) : null)
       const workers = Array.isArray((res as { workers?: unknown })?.workers)
         ? ((res as { workers: RawRemoteWorker[] }).workers)
         : []
@@ -605,9 +742,11 @@ export async function collectHqSnapshot(
         env,
         envName,
         sshTarget,
+        httpRelay,
+        httpRelaySnap,
         viaHub: null,
         viaHubSsh: null,
-        ok: res !== null || remotePsRes !== null,
+        ok: res !== null || remotePsRes !== null || httpRelaySnap !== null,
         workers,
         remotePs,
         metrics
@@ -615,14 +754,44 @@ export async function collectHqSnapshot(
     })
   )
 
-  // Hub Relay Discovery: ask paired hub hosts (e.g. a remote Mac mini) for their downstream paired servers
+  // Hub Relay Discovery: prefer Zero-SSH HTTP Hub Relay when configured, else fall back to SSH Hub Relay
   const seenEnvNames = new Set<string>(['local', ...directRemoteResults.map((r) => r.envName.toLowerCase())])
   const localHostNorm = cleanLocalHostLabel().toLowerCase()
   const relayedResults: RemoteHostResult[] = []
 
+  for (const hub of directRemoteResults) {
+    if (!hub.httpRelay || !hub.httpRelaySnap || !Array.isArray(hub.httpRelaySnap.children)) continue
+    for (const ch of hub.httpRelaySnap.children) {
+      const childName = ch.envName || ch.env?.name || ch.env?.id || ''
+      if (!childName) continue
+      const lower = childName.toLowerCase()
+      if (seenEnvNames.has(lower) || lower === localHostNorm) continue
+      seenEnvNames.add(lower)
+      if (hubHttpByHostOut) hubHttpByHostOut.set(childName, hub.httpRelay)
+      relayedResults.push({
+        env: ch.env || { name: childName },
+        envName: childName,
+        sshTarget: childName,
+        httpRelay: null,
+        httpRelaySnap: null,
+        viaHub: hub.envName,
+        viaHubSsh: null,
+        ok: Boolean(ch.ok || ch.metrics || (ch.workers && ch.workers.length) || (ch.remotePs && ch.remotePs.length)),
+        workers: Array.isArray(ch.workers) ? ch.workers : [],
+        remotePs: Array.isArray(ch.remotePs) ? ch.remotePs : [],
+        metrics: ch.metrics ?? null
+      })
+    }
+  }
+
   const relayProbes = await Promise.all(
     directRemoteResults
-      .filter((hub) => hub.ok && (hub.metrics !== null || hub.envName === controlHostId || Boolean(cfg.sshTargets[hub.envName.toLowerCase()])))
+      .filter(
+        (hub) =>
+          !hub.httpRelay &&
+          hub.ok &&
+          (hub.metrics !== null || hub.envName === controlHostId || Boolean(cfg.sshTargets[hub.envName.toLowerCase()]))
+      )
       .map(async (hub) => {
         const childEnvsRes = await relayCli(hub.sshTarget, ['environment', 'list', '--json']).catch(() => null)
         const childEnvs: RawEnv[] = Array.isArray((childEnvsRes as { environments?: unknown })?.environments)
@@ -660,6 +829,8 @@ export async function collectHqSnapshot(
             env: childEnv,
             envName: childName,
             sshTarget: childSsh,
+            httpRelay: null,
+            httpRelaySnap: null,
             viaHub: hub.envName,
             viaHubSsh: hub.sshTarget,
             ok: res !== null || remotePsRes !== null || metrics !== null,
@@ -1103,13 +1274,15 @@ export default function activate(
   metricsRunner: MetricsRunner = defaultMetricsRunner,
   videoSaver: VideoSaver = defaultVideoSaver,
   wallOpener: WallOpener = defaultWallOpener,
-  relayCli: RelayCliRunner = runRelayedOrcaCliJson
+  relayCli: RelayCliRunner = runRelayedOrcaCliJson,
+  hubRelayClient: HubRelayClient = defaultHubRelayClient
 ): void {
   const eventLog: HqEventEntry[] = [
     { ts: Date.now(), kind: 'system', message: 'CYBER HQ RADAR ONLINE · LINKED TO ORCA MESH' }
   ]
   let latestSnapshot: HqSnapshot | null = null
   const hubSshByHost = new Map<string, string>()
+  const hubHttpByHost = new Map<string, HubRelayTarget>()
 
   const pushLog = (kind: HqEventEntry['kind'], message: string) => {
     eventLog.unshift({ ts: Date.now(), kind, message })
@@ -1130,7 +1303,17 @@ export default function activate(
 
   const refreshAndBroadcast = async (): Promise<HqSnapshot> => {
     hubSshByHost.clear()
-    const snap = await collectHqSnapshot(orca, cli, metricsRunner, eventLog, relayCli, hubSshByHost)
+    hubHttpByHost.clear()
+    const snap = await collectHqSnapshot(
+      orca,
+      cli,
+      metricsRunner,
+      eventLog,
+      relayCli,
+      hubSshByHost,
+      hubRelayClient,
+      hubHttpByHost
+    )
     latestSnapshot = snap
     const activeTotal = snap.summary.activeWorkers + snap.summary.workingBots
     const tone = activeTotal > 0 ? 'accent' : 'success'
@@ -1230,6 +1413,14 @@ export default function activate(
 
     const selector = wsId ? `id:${wsId}` : wsPath ? `path:${wsPath}` : null
     if (selector) {
+      const hubHttp = hubHttpByHost.get(host)
+      if (hubHttp) {
+        const activated = await hubRelayClient.activateWorktree(hubHttp, host, selector).catch(() => false)
+        if (activated) {
+          pushLog('workspace', `ACTIVATED VIA HUB RELAY :: ${host} · ${wsPath || wsId}`)
+          return { opened: true, mode: 'activated', detail: `Activated on ${host}` }
+        }
+      }
       const hubSsh = hubSshByHost.get(host)
       const act = hubSsh
         ? await relayCli(hubSsh, ['worktree', 'activate', '--environment', host, '--worktree', selector, '--json'])

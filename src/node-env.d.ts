@@ -57,10 +57,23 @@ declare module 'node:http' {
   export interface IncomingMessage {
     method?: string
     url?: string
+    statusCode?: number
     headers: Record<string, string | string[] | undefined>
     on(event: 'data', listener: (chunk: Uint8Array | string) => void): void
     on(event: 'end', listener: () => void): void
     on(event: 'close', listener: () => void): void
+  }
+  export interface ClientRequest {
+    on(event: 'error', listener: (err: Error) => void): void
+    on(event: 'timeout', listener: () => void): void
+    write(chunk: string): boolean
+    end(): void
+    destroy(): void
+  }
+  export interface RequestOptions {
+    method?: string
+    headers?: Record<string, string>
+    timeout?: number
   }
   export interface ServerResponse {
     writeHead(statusCode: number, headers?: Record<string, string>): void
@@ -73,6 +86,12 @@ declare module 'node:http' {
     close(cb?: () => void): void
   }
   export function createServer(handler: (req: IncomingMessage, res: ServerResponse) => void): Server
+  export function request(url: string, options: RequestOptions, cb: (res: IncomingMessage) => void): ClientRequest
+}
+
+declare module 'node:https' {
+  import type { ClientRequest, IncomingMessage, RequestOptions } from 'node:http'
+  export function request(url: string, options: RequestOptions, cb: (res: IncomingMessage) => void): ClientRequest
 }
 
 declare const __dirname: string | undefined

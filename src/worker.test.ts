@@ -1,5 +1,5 @@
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
-import type { CliRunner, MetricsRunner, RelayCliRunner, VideoSaver, WallOpener } from './worker'
+import type { CliRunner, HubRelayClient, MetricsRunner, RelayCliRunner, VideoSaver, WallOpener } from './worker'
 import * as main from './worker'
 
 test('collects multi-host bots, workers, and performance metrics, jumps sessions, exports video, and opens fullscreen wall', async () => {
@@ -486,6 +486,122 @@ test('discovers downstream servers via hub SSH relay, attributes multi-host bot 
   assert.equal(jump.opened, true)
   assert.equal(jump.mode, 'activated')
   assert.ok(relayedCalls.some((c) => c.includes('worktree activate') && c.includes('gpu-box')))
+
+  await worker.deactivate()
+})
+
+test('supports zero-SSH HTTP hub relay for hub metrics, downstream GPU/QA discovery, and worktree activation', async () => {
+  const host = mockHost({
+    results: {
+      'settings.get': {
+        settings: {
+          hubRelays: 'HUB-MAC=http://100.64.0.1:19768#secret-token-xyz'
+        }
+      },
+      'workspace.list': { workspaces: [], truncated: false }
+    }
+  })
+
+  const mockCli: CliRunner = async (args) => {
+    if (args[0] === 'environment' && args[1] === 'list') {
+      return {
+        environments: [
+          { id: 'env-hub', name: 'hub-mac', endpoints: [{ endpoint: 'ws://100.64.0.1:6768' }] }
+        ]
+      }
+    }
+    if (args[0] === 'bot' && args[1] === 'list') {
+      return {
+        bots: [
+          { id: 'b-hub', name: 'Alpha Delivery', agent: 'antigravity', chats: { count: 4 } }
+        ]
+      }
+    }
+    if (args[0] === 'worktree' && args[1] === 'ps' && args.includes('hub-mac')) {
+      return {
+        worktrees: [
+          { worktreeId: 'folder:alpha-del', repo: 'Bots', bot: 'Alpha Delivery', botHome: true, status: 'idle', lastActivityAt: 200 }
+        ]
+      }
+    }
+    return { workers: [], worktrees: [] }
+  }
+
+  let sshCalledForRemote = false
+  const mockMetrics: MetricsRunner = async (hostId) => {
+    if (hostId !== 'local') {
+      sshCalledForRemote = true
+      return null
+    }
+    return { cpuPct: 12, ramPct: 40, ramUsedGb: 25, ramTotalGb: 64, diskPct: 50, diskFreeGb: 200, load1: 1.2, cores: 16, osName: 'macOS', gpu: null }
+  }
+
+  let activatedArgs: { host: string; selector: string } | null = null
+  const mockHubHttp: HubRelayClient = {
+    async fetchSnapshot(target) {
+      assert.equal(target.baseUrl, 'http://100.64.0.1:19768')
+      assert.equal(target.token, 'secret-token-xyz')
+      return {
+        ok: true,
+        host: {
+          hostname: 'hub-mac',
+          metrics: { cpuPct: 27, ramPct: 62, ramUsedGb: 9.9, ramTotalGb: 16, diskPct: 78, diskFreeGb: 40, load1: 2.3, cores: 10, osName: 'macOS', gpu: null }
+        },
+        children: [
+          {
+            env: { id: 'c1', name: 'gpu-box', endpoints: [{ endpoint: 'ws://100.64.0.10:6768' }] },
+            envName: 'gpu-box',
+            ok: true,
+            workers: [
+              { dispatchId: 'ctx_http_1', state: 'working', liveness: 'live', agent: 'antigravity/gemini-4-neon', workspace: 'r1::/work/alpha/gpu-task' }
+            ],
+            remotePs: [
+              { worktreeId: 'r1::/work/alpha/gpu-task', repo: 'alpha', displayName: 'gpu-task', path: '/work/alpha/gpu-task', status: 'working', crossStoreParent: { parent: { workspaceKey: 'folder:alpha-del' } }, lastActivityAt: 500 }
+            ],
+            metrics: {
+              cpuPct: 44, ramPct: 38, ramUsedGb: 12, ramTotalGb: 31, diskPct: 33, diskFreeGb: 88, load1: 3.1, cores: 20, osName: 'Linux',
+              gpu: { name: 'RTX 4070', utilPct: 55, vramUsedMiB: 3200, vramTotalMiB: 12282, tempC: 54, powerW: 95 }
+            }
+          },
+          {
+            env: { id: 'c2', name: 'qa-box', endpoints: [{ endpoint: 'ws://100.64.0.20:6768' }] },
+            envName: 'qa-box',
+            ok: true,
+            workers: [],
+            remotePs: [],
+            metrics: { cpuPct: 14, ramPct: 31, ramUsedGb: 4.3, ramTotalGb: 14, diskPct: 25, diskFreeGb: 48, load1: 0.7, cores: 16, osName: 'Linux', gpu: null }
+          }
+        ]
+      }
+    },
+    async activateWorktree(_target, h, selector) {
+      activatedArgs = { host: h, selector }
+      return true
+    }
+  }
+
+  const mod = {
+    default: (orca: Parameters<typeof main.default>[0]) =>
+      main.default(orca, mockCli, mockMetrics, undefined, undefined, undefined, mockHubHttp),
+    deactivate: main.deactivate
+  }
+  const worker = await mountWorker(mod, { host })
+  const snap = await worker.request('hq.getSnapshot')
+
+  assert.equal(sshCalledForRemote, false)
+  assert.equal(snap.hosts.length, 4)
+  assert.equal(snap.hosts.find((h) => h.id === 'hub-mac')?.metrics?.cpuPct, 27)
+  assert.equal(snap.hosts.find((h) => h.id === 'gpu-box')?.metrics?.gpu?.name, 'RTX 4070')
+  assert.equal(snap.hosts.find((h) => h.id === 'qa-box')?.metrics?.cpuPct, 14)
+  assert.equal(snap.workers.find((w) => w.id === 'ctx_http_1')?.bot, 'Alpha Delivery')
+
+  const jump = await worker.request('hq.openSession', {
+    workspaceId: 'r1::/work/alpha/gpu-task',
+    host: 'gpu-box'
+  })
+  assert.equal(jump.opened, true)
+  assert.equal(jump.mode, 'activated')
+  assert.deepEqual(activatedArgs, { host: 'gpu-box', selector: 'id:r1::/work/alpha/gpu-task' })
 
   await worker.deactivate()
 })
